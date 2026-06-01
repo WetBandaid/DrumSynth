@@ -101,7 +101,7 @@ CONTROL_TOOLTIPS = {
     "step_velocity": "Set the selected step's hit level.",
     "step_probability": "Set the selected step's chance of triggering.",
     "step_ratchet": "Repeat the selected step multiple times within its step duration.",
-    "step_bass_note": "Set this step's note. Changing this turns on Note Mode for the selected track.",
+    "step_bass_note": "Set this step's note override. C2 clears the override and returns the step to the base patch pitch.",
     "inspector_active": "Turn the selected sequencer step on or off.",
     "inspector_audition": "Audition the selected track once.",
     "inspector_edit_sound": "Jump to this track's sound-design tab.",
@@ -1725,7 +1725,7 @@ class MainWindow(QMainWindow):
                 )
                 button.setText(
                     self._note_name(track.bass_notes[step])
-                    if enabled and track.bass_enabled
+                    if enabled
                     else str(step + 1)
                 )
                 button.style().unpolish(button)
@@ -1915,7 +1915,7 @@ class MainWindow(QMainWindow):
         with self.engine.lock:
             track = self.engine.tracks[track_index]
             enabled = bool(track.pattern[step])
-            show_note = enabled and track.bass_enabled
+            show_note = enabled
             text = self._note_name(track.bass_notes[step]) if show_note else str(step + 1)
         self.step_buttons[track_index][step].setText(text)
 

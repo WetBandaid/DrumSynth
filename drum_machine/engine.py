@@ -174,6 +174,9 @@ class DrumEngine:
         should_render = False
         with self.lock:
             setattr(self.tracks[track], param, value)
+            if param == "bass_enabled" and bool(value) and not any(self.tracks[track].bass_note_enabled):
+                self.tracks[track].bass_note_enabled = [bool(step) for step in self.tracks[track].pattern]
+                self._store_current_scene_locked()
             if param not in {"muted", "solo", "track_steps"}:
                 self._clear_track_cache(track)
                 should_render = self.playing
@@ -189,11 +192,12 @@ class DrumEngine:
                 return
             values = getattr(self.tracks[track], param)
             values[step] = value
-            self._store_current_scene_locked()
             if param == "bass_notes":
-                self.tracks[track].bass_enabled = True
+                self.tracks[track].bass_note_enabled[step] = int(value) != 36
+                self.tracks[track].bass_enabled = any(self.tracks[track].bass_note_enabled)
                 self._clear_track_cache(track)
                 should_render = self.playing
+            self._store_current_scene_locked()
         if should_render:
             self.prepare_render_cache_async()
 
@@ -233,6 +237,7 @@ class DrumEngine:
                 self.tracks[index].probabilities = track.probabilities
                 self.tracks[index].ratchets = track.ratchets
                 self.tracks[index].bass_notes = track.bass_notes
+                self.tracks[index].bass_note_enabled = track.bass_note_enabled
                 self.tracks[index].track_steps = track.track_steps
             self._store_current_scene_locked()
 
@@ -285,6 +290,7 @@ class DrumEngine:
                     "probabilities": [1.0] * STEPS,
                     "ratchets": [1] * STEPS,
                     "bass_notes": [36] * STEPS,
+                    "bass_note_enabled": [False] * STEPS,
                     "track_steps": int(track.track_steps),
                 }
                 for track in self.tracks
@@ -580,6 +586,7 @@ class DrumEngine:
             "probabilities": [1.0] * STEPS,
             "ratchets": [1] * STEPS,
             "bass_notes": [36] * STEPS,
+            "bass_note_enabled": [False] * STEPS,
             "track_steps": int(np.clip(track_steps, 1, STEPS)),
         }
 
@@ -643,6 +650,7 @@ class DrumEngine:
                 track.probabilities = [1.0] * STEPS
                 track.ratchets = [1] * STEPS
                 track.bass_notes = [36] * STEPS
+                track.bass_note_enabled = [False] * STEPS
             self._store_current_scene_locked()
 
     def copy_track_pattern(self, track_index: int):
@@ -665,12 +673,13 @@ class DrumEngine:
             track.probabilities = [1.0] * STEPS
             track.ratchets = [1] * STEPS
             track.bass_notes = [36] * STEPS
+            track.bass_note_enabled = [False] * STEPS
             self._store_current_scene_locked()
 
     def rotate_track_pattern(self, track_index: int, amount: int):
         with self.lock:
             track = self.tracks[track_index]
-            for key in ("pattern", "velocities", "probabilities", "ratchets", "bass_notes"):
+            for key in ("pattern", "velocities", "probabilities", "ratchets", "bass_notes", "bass_note_enabled"):
                 values = list(getattr(track, key))
                 shift = amount % STEPS
                 setattr(track, key, values[-shift:] + values[:-shift] if shift else values)
@@ -846,7 +855,7 @@ class DrumEngine:
             if cached is not None:
                 self.voices.append(SampleVoice(cached))
                 return
-            if self.playing and track_index in self.fallback_hits and not self._uses_note_mode(source_track):
+            if self.playing and track_index in self.fallback_hits and not self._has_note_overrides(source_track):
                 self.voices.append(SampleVoice(self.fallback_hits[track_index]))
                 return
             render_job = (track_index, key, track_snapshot, phase_key, global_fx_amount)
@@ -891,6 +900,7 @@ class DrumEngine:
                         "probabilities": [1.0] * STEPS,
                         "ratchets": [1] * STEPS,
                         "bass_notes": [36] * STEPS,
+                        "bass_note_enabled": [False] * STEPS,
                         "track_steps": track.track_steps,
                     }
                 )
@@ -940,6 +950,7 @@ class DrumEngine:
             "probabilities": [float(value) for value in track.probabilities],
             "ratchets": [int(value) for value in track.ratchets],
             "bass_notes": [int(value) for value in track.bass_notes],
+            "bass_note_enabled": [bool(value) for value in track.bass_note_enabled],
             "track_steps": int(track.track_steps),
         }
 
@@ -983,6 +994,12 @@ class DrumEngine:
         )
         track.ratchets = self._fit_pattern_list(data.get("ratchets", track.ratchets), 1, int)
         track.bass_notes = self._fit_pattern_list(data.get("bass_notes", track.bass_notes), 36, int)
+        if "bass_note_enabled" in data:
+            track.bass_note_enabled = self._fit_pattern_list(
+                data.get("bass_note_enabled", []), False, bool
+            )
+        else:
+            track.bass_note_enabled = [int(note) != 36 for note in track.bass_notes]
         track.track_steps = int(np.clip(data.get("track_steps", track.track_steps), 1, STEPS))
 
     def _morph_scene_locked(self, source: dict, target: dict, amount: float) -> dict:
@@ -1013,6 +1030,12 @@ class DrumEngine:
         target_ratchets = self._fit_pattern_list(target_data.get("ratchets", []), 1, int)
         source_bass_notes = self._fit_pattern_list(source_data.get("bass_notes", []), 36, int)
         target_bass_notes = self._fit_pattern_list(target_data.get("bass_notes", []), 36, int)
+        source_bass_note_enabled = self._fit_pattern_list(
+            source_data.get("bass_note_enabled", []), False, bool
+        )
+        target_bass_note_enabled = self._fit_pattern_list(
+            target_data.get("bass_note_enabled", []), False, bool
+        )
         source_steps = int(np.clip(source_data.get("track_steps", STEPS), 1, STEPS))
         target_steps = int(np.clip(target_data.get("track_steps", STEPS), 1, STEPS))
 
@@ -1021,6 +1044,7 @@ class DrumEngine:
         probabilities = []
         ratchets = []
         bass_notes = []
+        bass_note_enabled = []
         for step in range(STEPS):
             source_active = bool(source_pattern[step])
             target_active = bool(target_pattern[step])
@@ -1071,6 +1095,9 @@ class DrumEngine:
                     )
                 )
             )
+            bass_note_enabled.append(
+                bool(target_bass_note_enabled[step] if amount >= 0.5 else source_bass_note_enabled[step])
+            )
 
         return {
             "pattern": pattern,
@@ -1078,6 +1105,7 @@ class DrumEngine:
             "probabilities": probabilities,
             "ratchets": ratchets,
             "bass_notes": bass_notes,
+            "bass_note_enabled": bass_note_enabled,
             "track_steps": int(np.clip(round(self._blend(source_steps, target_steps, amount)), 1, STEPS)),
         }
 
@@ -1135,6 +1163,7 @@ class DrumEngine:
             "probabilities",
             "ratchets",
             "bass_notes",
+            "bass_note_enabled",
             "muted",
             "solo",
             "track_steps",
@@ -1192,7 +1221,7 @@ class DrumEngine:
                 for step, enabled in enumerate(track.pattern)
                 if enabled and step < max(1, track.track_steps)
             ]
-            if not self._uses_note_mode(track):
+            if not self._has_note_overrides(track):
                 active_steps = active_steps[:1]
             for step in active_steps:
                 track_snapshot = self._render_track_for_step(track, step)
@@ -1248,7 +1277,7 @@ class DrumEngine:
         render_track = self._render_track_for_step(source_track, step)
         key, phase_key = self._cache_key_for_track(track_index, render_track, lfo_phase)
         if key not in self.render_cache:
-            if self.playing and track_index in self.fallback_hits and not self._uses_note_mode(source_track):
+            if self.playing and track_index in self.fallback_hits and not self._has_note_overrides(source_track):
                 return self.fallback_hits[track_index]
             self.render_cache[key] = self._render_track_copy(
                 render_track,
@@ -1260,21 +1289,28 @@ class DrumEngine:
 
     def _render_track_for_step(self, track, step: int):
         render_track = copy.copy(track)
-        if self._uses_note_mode(track):
+        if not self._uses_note_mode_for_step(track, step):
+            render_track.bass_enabled = False
+            if hasattr(render_track, "step_note_hz"):
+                delattr(render_track, "step_note_hz")
+        else:
             note = int(np.clip(track.bass_notes[step % STEPS], 12, 84))
             target_hz = self._midi_to_frequency(note)
             render_track.step_note_hz = target_hz
-            if track.instrument == "Kick":
-                render_track.pitch = float(
-                    np.clip(track.pitch * target_hz / max(1.0, track.tone_end), 0.25, 7.0)
-                )
-            else:
-                semitones = note - 36
-                render_track.pitch = float(np.clip(track.pitch * (2.0 ** (semitones / 12.0)), 0.25, 7.0))
+            semitones = note - 36
+            render_track.pitch = float(np.clip(track.pitch * (2.0 ** (semitones / 12.0)), 0.25, 7.0))
         return render_track
 
-    def _uses_note_mode(self, track) -> bool:
-        return bool(getattr(track, "bass_enabled", False))
+    def _uses_note_mode_for_step(self, track, step: int) -> bool:
+        if not bool(getattr(track, "bass_enabled", False)):
+            return False
+        note_flags = getattr(track, "bass_note_enabled", [True] * STEPS)
+        return bool(note_flags[step % STEPS])
+
+    def _has_note_overrides(self, track) -> bool:
+        return bool(getattr(track, "bass_enabled", False)) and any(
+            bool(value) for value in getattr(track, "bass_note_enabled", [True] * STEPS)
+        )
 
     def _midi_to_frequency(self, note: int) -> float:
         return 440.0 * (2.0 ** ((int(note) - 69) / 12.0))

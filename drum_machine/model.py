@@ -24,6 +24,7 @@ TRACK_SOUND_EXCLUDED_KEYS = {
     "probabilities",
     "ratchets",
     "bass_notes",
+    "bass_note_enabled",
 }
 
 
@@ -98,6 +99,7 @@ class TrackState:
     ratchets: list[int] = field(default_factory=lambda: [1] * STEPS)
     bass_enabled: bool = False
     bass_notes: list[int] = field(default_factory=lambda: [36] * STEPS)
+    bass_note_enabled: list[bool] = field(default_factory=lambda: [False] * STEPS)
 
     def apply_preset(self, instrument: str):
         defaults = TrackState(name=self.name, instrument=instrument)
@@ -172,6 +174,7 @@ class TrackState:
                 "ratchets",
                 "bass_enabled",
                 "bass_notes",
+                "bass_note_enabled",
             )
         }
 
@@ -203,6 +206,8 @@ class TrackState:
                 value = _fit_list([int(step) for step in value], 1)
             elif key == "bass_notes":
                 value = _fit_list([max(12, min(84, int(step))) for step in value], 36)
+            elif key == "bass_note_enabled":
+                value = _fit_list([bool(step) for step in value], False)
             elif key == "track_steps":
                 value = max(1, min(STEPS, int(value)))
             elif key == "saturation_mode" and value not in SATURATION_MODES:

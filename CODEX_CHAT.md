@@ -100,6 +100,11 @@ Implemented so far:
 - Startup now creates a random generated multi-scene session using the same style list as the Song Mode generator. The generator controls reflect the randomly chosen startup style and parameters.
 - Fixed Note Mode cache identity so each step note frequency is included in the rendered-hit cache key and deterministic render seed. Different notes no longer reuse a previous step's cached audio across sequencer loops.
 - Startup generation now creates four scenes by default, and the Song Mode generator's Patterns control no longer inherits a smaller random startup count. Pressing Generate starts from the normal four-pattern default unless the user changes it.
+- Step Note edits now create per-step note overrides instead of making every step on the track render through Note Mode. Non-overridden steps keep the normal patch pitch, and only overridden active steps show note labels.
+- Sequencer step labels on Note Mode tracks now always show the step's note name, even when the note is still the default value.
+- Sequencer note labels now appear on active steps regardless of whether Note Mode has been enabled yet, so the default/original step note is visible before the first edit.
+- Changing a Step Note back to C2 now clears that step's pitch override, so the kick returns to the original base patch sound instead of staying on the tuned-note render path.
+- Kick Step Note overrides now transpose the normal kick patch by semitones instead of switching to a separate tuned-bass synthesis path, so note edits change pitch without changing the kick character.
 
 ## Verification Commands Used
 

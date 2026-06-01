@@ -236,14 +236,15 @@ def hat_noise(
         flex_amount = 0.006 * wobble_depth
         resonant = np.zeros(length, dtype=np.float32)
         for freq, gain, decay in (
-            (520.0, 0.08, 2.20),
-            (820.0, 0.12, 1.95),
-            (1390.0, 0.17, 1.70),
-            (2140.0, 0.22, 1.42),
-            (3160.0, 0.27, 1.12),
-            (4520.0, 0.23, 0.88),
-            (6380.0, 0.16, 0.62),
-            (8900.0, 0.08, 0.38),
+            (410.0, 0.07, 2.55),
+            (655.0, 0.09, 2.25),
+            (1030.0, 0.12, 2.05),
+            (1510.0, 0.18, 1.82),
+            (2380.0, 0.25, 1.56),
+            (3570.0, 0.30, 1.28),
+            (5140.0, 0.28, 1.02),
+            (7310.0, 0.20, 0.78),
+            (10150.0, 0.11, 0.50),
         ):
             freq *= crash_pitch
             slow_wobble = np.sin(2.0 * np.pi * (1.3 + gain * 8.0) * t + gain * 9.0)
@@ -262,40 +263,43 @@ def hat_noise(
                 * gain
             )
 
-        stick = spectral_noise(length, *scaled_noise_band(750.0, 16500.0, crash_pitch))
-        stick *= timed_envelope(length, 0.018, 0.00015)
-        bell_ping = np.sin(2.0 * np.pi * 3850.0 * crash_pitch * t + 0.7)
-        bell_ping += 0.45 * np.sin(2.0 * np.pi * 6120.0 * crash_pitch * t + 1.4)
-        bell_ping *= timed_envelope(length, 0.030, 0.00025)
+        edge = spectral_noise(length, *scaled_noise_band(2800.0, 19000.0, crash_pitch))
+        edge *= timed_envelope(length, 0.009, 0.00008)
+        stick = spectral_noise(length, *scaled_noise_band(850.0, 18000.0, crash_pitch))
+        stick *= timed_envelope(length, 0.026, 0.00012)
+        bell_ping = np.sin(2.0 * np.pi * 2760.0 * crash_pitch * t + 0.7)
+        bell_ping += 0.62 * np.sin(2.0 * np.pi * 4210.0 * crash_pitch * t + 1.4)
+        bell_ping += 0.32 * np.sin(2.0 * np.pi * 6930.0 * crash_pitch * t + 2.2)
+        bell_ping *= timed_envelope(length, 0.055, 0.00020)
 
-        low, high = scaled_noise_band(650.0, 15500.0, crash_pitch)
+        low, high = scaled_noise_band(520.0, 18000.0, crash_pitch)
         impact = spectral_noise(length, low, high)
-        impact *= timed_envelope(length, max(0.075, noise_seconds * 0.12), 0.00035)
+        impact *= timed_envelope(length, max(0.095, noise_seconds * 0.16), 0.00028)
         low, high = scaled_noise_band(780.0, 9800.0, crash_pitch)
         body = spectral_noise(length, low, high)
-        body *= timed_envelope(length, max(0.045, noise_seconds * 0.82), 0.006)
+        body *= timed_envelope(length, max(0.080, noise_seconds * 0.95), 0.004)
         low, high = scaled_noise_band(420.0, 4200.0, crash_pitch)
         low_wash = spectral_noise(length, low, high)
-        low_wash *= timed_envelope(length, max(0.060, noise_seconds * 1.28), 0.018)
-        low, high = scaled_noise_band(4300.0, 13500.0, crash_pitch)
+        low_wash *= timed_envelope(length, max(0.080, noise_seconds * 1.42), 0.016)
+        low, high = scaled_noise_band(3600.0, 16000.0, crash_pitch)
         shimmer = spectral_noise(length, low, high)
-        shimmer *= timed_envelope(length, max(0.035, noise_seconds * 0.48), 0.028)
+        shimmer *= timed_envelope(length, max(0.060, noise_seconds * 0.70), 0.020)
 
-        tail_bloom = 1.0 - np.exp(-t / 0.035)
-        high_tail_duck = 0.10 + 0.90 * np.exp(-t / max(0.045, 0.42 * tail_scale))
+        tail_bloom = 1.0 - np.exp(-t / 0.022)
+        high_tail_duck = 0.18 + 0.82 * np.exp(-t / max(0.070, 0.56 * tail_scale))
         shimmer *= (tail_bloom * high_tail_duck).astype(np.float32)
         low_wash *= tail_bloom.astype(np.float32)
-        moving_body = body + resonant * 0.28 + low_wash * 0.35
+        moving_body = body + resonant * 0.36 + low_wash * 0.40
         flex_gain = 0.82 + 0.18 * flex * wobble_depth
-        cymbal = stick * 0.42 + bell_ping.astype(np.float32) * 0.13
-        cymbal += impact * 0.78 + moving_body * 0.78 + resonant * 0.54
-        cymbal += low_wash * 0.24 + shimmer * 0.16
+        cymbal = edge * 0.42 + stick * 0.56 + bell_ping.astype(np.float32) * 0.20
+        cymbal += impact * 0.92 + moving_body * 0.86 + resonant * 0.70
+        cymbal += low_wash * 0.30 + shimmer * 0.24
         cymbal *= flex_gain.astype(np.float32)
-        dark_tail = one_pole_lowpass(cymbal.astype(np.float32), 5200.0, 0.04)
-        dark_start = max(0.025, 0.24 * tail_scale)
-        dark_mix = np.clip((t - dark_start) / max(0.10, 1.45 * tail_scale), 0.0, 0.72)
+        dark_tail = one_pole_lowpass(cymbal.astype(np.float32), 6200.0, 0.035)
+        dark_start = max(0.045, 0.32 * tail_scale)
+        dark_mix = np.clip((t - dark_start) / max(0.14, 1.65 * tail_scale), 0.0, 0.66)
         cymbal = cymbal * (1.0 - dark_mix) + dark_tail * dark_mix
-        return normalize_peak(np.tanh(cymbal * 1.18).astype(np.float32), 0.92)
+        return normalize_peak(np.tanh(cymbal * 1.26).astype(np.float32), 0.94)
 
     for freq, gain in (
         (5150.0, 0.28),
@@ -472,7 +476,7 @@ def make_hit(
     velocity = float(np.clip(velocity, 0.0, 1.5))
     volume = float(np.clip(track.volume, 0.0, 1.2)) * velocity
     uses_step_notes = bool(getattr(track, "bass_enabled", False))
-    is_tuned_bass = uses_step_notes and track.instrument == "Kick"
+    is_tuned_bass = False
     pitch = float(np.clip(track.pitch, 0.35, 7.0 if uses_step_notes else 2.5))
     decay_scale = 0.35 + float(np.clip(track.decay, 0.05, 1.0)) * 1.3
     tone_seconds = max(0.005, track.tone_decay * decay_scale)
@@ -577,9 +581,13 @@ def make_hit(
         elif track.instrument == "Snare":
             click = band_limited_noise(click_len, 850.0, 7600.0)
             click *= timed_envelope(click_len, 0.011, 0.00035)
-        elif track.instrument in {"Closed Hat", "Open Hat", "Crash"}:
-            click = band_limited_noise(click_len, 5200.0 if track.instrument == "Crash" else 6500.0, 14000.0)
-            click *= timed_envelope(click_len, 0.018 if track.instrument == "Crash" else 0.009, 0.0004)
+        elif track.instrument == "Crash":
+            click_len = min(length, int(0.024 * SAMPLE_RATE))
+            click = band_limited_noise(click_len, 3400.0, 18000.0)
+            click *= timed_envelope(click_len, 0.022, 0.00018)
+        elif track.instrument in {"Closed Hat", "Open Hat"}:
+            click = band_limited_noise(click_len, 6500.0, 14000.0)
+            click *= timed_envelope(click_len, 0.009, 0.0004)
         else:
             click = highpass_like(noise(click_len / SAMPLE_RATE))
             click *= envelope(click_len, 0.018, 16.0)
@@ -593,7 +601,9 @@ def make_hit(
             else 0.62
             if track.instrument == "Snare"
             else 0.7
-            if track.instrument in {"Closed Hat", "Open Hat", "Crash"}
+            if track.instrument in {"Closed Hat", "Open Hat"}
+            else 0.78
+            if track.instrument == "Crash"
             else 1.0
         )
         hit[:click_len] += click * click_gain
