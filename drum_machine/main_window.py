@@ -772,8 +772,6 @@ class MainWindow(QMainWindow):
         self.generator_patterns.setKeyboardTracking(False)
         self._set_tip(self.generator_patterns, "generate_patterns")
         startup = self.engine.startup_generation
-        if startup:
-            self.generator_patterns.setValue(int(startup.get("pattern_count", self.generator_patterns.value())))
         generator_grid.addWidget(QLabel("Patterns"), 0, 0)
         generator_grid.addWidget(self.generator_patterns, 0, 1)
 

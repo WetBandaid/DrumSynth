@@ -99,6 +99,7 @@ Implemented so far:
 - Strengthened Note Mode across all tracks by carrying each step's target note frequency into synthesis and adding a subtle note-mode resonant layer for non-kick tracks, making note changes audible even on noisy instruments like hats, clap, and snare.
 - Startup now creates a random generated multi-scene session using the same style list as the Song Mode generator. The generator controls reflect the randomly chosen startup style and parameters.
 - Fixed Note Mode cache identity so each step note frequency is included in the rendered-hit cache key and deterministic render seed. Different notes no longer reuse a previous step's cached audio across sequencer loops.
+- Startup generation now creates four scenes by default, and the Song Mode generator's Patterns control no longer inherits a smaller random startup count. Pressing Generate starts from the normal four-pattern default unless the user changes it.
 
 ## Verification Commands Used
 

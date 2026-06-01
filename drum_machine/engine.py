@@ -316,7 +316,7 @@ class DrumEngine:
     def generate_startup_session(self):
         rng = np.random.default_rng()
         style = str(rng.choice(GENERATOR_STYLES))
-        pattern_count = int(rng.integers(2, min(PATTERN_SCENES, 4) + 1))
+        pattern_count = min(PATTERN_SCENES, 4)
         bars_per_pattern = 4
         complexity = float(rng.uniform(0.38, 0.78))
         fills = float(rng.uniform(0.24, 0.68))
