@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 
 from .config import (
     FILTER_TYPES,
+    GENERATOR_STYLES,
     DRUM_PRESET_NAMES,
     INSTRUMENTS,
     LFO_DESTINATIONS,
@@ -770,6 +771,9 @@ class MainWindow(QMainWindow):
         self.generator_patterns.setValue(min(4, PATTERN_SCENES))
         self.generator_patterns.setKeyboardTracking(False)
         self._set_tip(self.generator_patterns, "generate_patterns")
+        startup = self.engine.startup_generation
+        if startup:
+            self.generator_patterns.setValue(int(startup.get("pattern_count", self.generator_patterns.value())))
         generator_grid.addWidget(QLabel("Patterns"), 0, 0)
         generator_grid.addWidget(self.generator_patterns, 0, 1)
 
@@ -778,36 +782,15 @@ class MainWindow(QMainWindow):
         self.generator_bars.setValue(4)
         self.generator_bars.setKeyboardTracking(False)
         self._set_tip(self.generator_bars, "generate_bars")
+        if startup:
+            self.generator_bars.setValue(int(startup.get("bars_per_pattern", self.generator_bars.value())))
         generator_grid.addWidget(QLabel("Bars"), 0, 2)
         generator_grid.addWidget(self.generator_bars, 0, 3)
 
         self.generator_style = QComboBox()
-        self.generator_style.addItems(
-            [
-                "House",
-                "Techno",
-                "Rock",
-                "Hip Hop",
-                "Boom Bap",
-                "Breakbeat",
-                "UK Garage",
-                "Jungle",
-                "Drum & Bass",
-                "Funk",
-                "Trap",
-                "Reggaeton",
-                "Latin",
-                "Disco",
-                "Electro",
-                "Synthwave",
-                "Dark Synth",
-                "Industrial",
-                "IDM",
-                "Minimal",
-                "Dub",
-                "Half-time",
-            ]
-        )
+        self.generator_style.addItems(GENERATOR_STYLES)
+        if startup.get("style") in GENERATOR_STYLES:
+            self.generator_style.setCurrentText(startup["style"])
         self._set_tip(self.generator_style, "generate_style")
         generator_grid.addWidget(QLabel("Style"), 0, 4)
         generator_grid.addWidget(self.generator_style, 0, 5)
@@ -815,6 +798,15 @@ class MainWindow(QMainWindow):
         self.generator_complexity, complexity_value = self._generator_slider(55, "generate_complexity")
         self.generator_fills, fills_value = self._generator_slider(45, "generate_fills")
         self.generator_variation, variation_value = self._generator_slider(35, "generate_variation")
+        if startup:
+            for slider, label, key in (
+                (self.generator_complexity, complexity_value, "complexity"),
+                (self.generator_fills, fills_value, "fills"),
+                (self.generator_variation, variation_value, "variation"),
+            ):
+                value = round(float(startup.get(key, slider.value() / 100.0)) * 100)
+                slider.setValue(value)
+                label.setText(f"{value}%")
         for column, (label, slider, value_label) in enumerate(
             (
                 ("Complexity", self.generator_complexity, complexity_value),

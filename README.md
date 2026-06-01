@@ -13,6 +13,7 @@ DSynth is a PySide6 desktop drum synthesizer and 8-track step sequencer. It uses
 - Step note labels on active steps when Note Mode is enabled
 - Song mode for chaining pattern scenes into longer arrangements
 - Static session generator for creating multiple pattern scenes and a Song Mode chain
+- Random generated startup session chosen from the generator styles
 - Per-track sound design tabs with nested editor tabs
 - Per-step velocity, probability, and ratchet controls
 - Note Mode for tuned per-step playback on any track
@@ -57,7 +58,7 @@ presets/                Default folder for saved track sound presets
 ## Basic Use
 
 1. Press `Play`.
-2. Use the Sequencer tab to toggle steps.
+2. DSynth starts with a randomly generated session. Use the Sequencer tab to edit or replace it.
 3. Use the scene buttons to switch between pattern scenes.
 4. Use the Song Mode tab to chain scenes into a longer arrangement.
 5. Use Track Sound Design to edit each drum patch.
@@ -112,6 +113,8 @@ Song Mode chains pattern scenes together so DSynth can play a longer arrangement
 - `Bars`: chooses how many bars that slot lasts
 - `Up` / `Down` / `Remove`: edits the slot order
 - `Generate`: writes a static multi-scene drum session using the selected pattern count, bars, style, complexity, fills, and variation. Styles include House, Techno, Rock, Hip Hop, Boom Bap, Breakbeat, UK Garage, Jungle, Drum & Bass, Funk, Trap, Reggaeton, Latin, Disco, Electro, Synthwave, Dark Synth, Industrial, IDM, Minimal, Dub, and Half-time.
+
+On startup, DSynth randomly chooses one of these generator styles and writes a fresh multi-scene session before playback begins. The generator controls show the startup values so the session can be regenerated or adjusted from there.
 
 Scene changes happen at bar boundaries. Song chains are saved and loaded with the JSON patch file.
 Song Mode has its own main tab, and the top-aligned slot list scrolls when the arrangement grows.

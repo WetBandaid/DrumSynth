@@ -6,7 +6,7 @@ import threading
 import numpy as np
 import sounddevice as sd
 
-from .config import CHANNELS, PATTERN_SCENES, SAMPLE_RATE, STEPS
+from .config import CHANNELS, GENERATOR_STYLES, PATTERN_SCENES, SAMPLE_RATE, STEPS
 from .effects import BusCompressor, one_pole_lowpass
 from .model import create_default_tracks
 from .synth import make_hit
@@ -74,6 +74,8 @@ class DrumEngine:
         self.render_random_lock = threading.Lock()
         self.stream: sd.OutputStream | None = None
         self.compressor = BusCompressor()
+        self.startup_generation = {}
+        self.generate_startup_session()
 
     def start_stream(self):
         if self.stream is None:
@@ -310,6 +312,31 @@ class DrumEngine:
             should_render = self.playing
         if should_render:
             self.prepare_render_cache_async()
+
+    def generate_startup_session(self):
+        rng = np.random.default_rng()
+        style = str(rng.choice(GENERATOR_STYLES))
+        pattern_count = int(rng.integers(2, min(PATTERN_SCENES, 4) + 1))
+        bars_per_pattern = 4
+        complexity = float(rng.uniform(0.38, 0.78))
+        fills = float(rng.uniform(0.24, 0.68))
+        variation = float(rng.uniform(0.20, 0.62))
+        self.startup_generation = {
+            "style": style,
+            "pattern_count": pattern_count,
+            "bars_per_pattern": bars_per_pattern,
+            "complexity": complexity,
+            "fills": fills,
+            "variation": variation,
+        }
+        self.generate_session(
+            pattern_count,
+            bars_per_pattern,
+            style,
+            complexity,
+            fills,
+            variation,
+        )
 
     def _generate_scene_pattern(
         self,
@@ -1115,6 +1142,8 @@ class DrumEngine:
             data.pop(sequencer_key, None)
         fx_amount = self.global_fx_amount if global_fx_amount is None else global_fx_amount
         data["_global_fx_amount"] = round(float(fx_amount), 3)
+        if hasattr(track, "step_note_hz"):
+            data["_step_note_hz"] = round(float(track.step_note_hz), 4)
         phase1, phase2 = self._split_phase(lfo_phase)
         phase_key = (
             round(float(phase1 if phase1 is not None else track.lfo_phase) % 1.0, 4)
@@ -1145,6 +1174,8 @@ class DrumEngine:
         data = track.sound_preset_dict()
         data["_phase_key"] = phase_key
         data["_global_fx_amount"] = round(float(global_fx_amount), 3)
+        if hasattr(track, "step_note_hz"):
+            data["_step_note_hz"] = round(float(track.step_note_hz), 4)
         payload = json.dumps(data, sort_keys=True, default=float)
         digest = hashlib.blake2s(payload.encode("utf-8"), digest_size=4).digest()
         return int.from_bytes(digest, "little")

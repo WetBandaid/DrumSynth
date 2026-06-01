@@ -25,6 +25,31 @@ DEFAULT_PATTERN = [
     "0001000000010000",
 ]
 
+GENERATOR_STYLES = [
+    "House",
+    "Techno",
+    "Rock",
+    "Hip Hop",
+    "Boom Bap",
+    "Breakbeat",
+    "UK Garage",
+    "Jungle",
+    "Drum & Bass",
+    "Funk",
+    "Trap",
+    "Reggaeton",
+    "Latin",
+    "Disco",
+    "Electro",
+    "Synthwave",
+    "Dark Synth",
+    "Industrial",
+    "IDM",
+    "Minimal",
+    "Dub",
+    "Half-time",
+]
+
 SATURATION_MODES = ["Soft", "Hard", "Fold", "Sine"]
 FILTER_TYPES = ["Off", "Low-pass", "High-pass", "Band-pass"]
 LFO_SHAPES = ["Sine", "Triangle", "Square", "Random"]
