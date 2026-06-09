@@ -205,7 +205,7 @@ class DrumEngine:
         with self.lock:
             return list(self.scene_names)
 
-    def set_track_param(self, track: int, param: str, value):
+    def set_track_param(self, track: int, param: str, value, render_async: bool = True):
         should_render = False
         with self.lock:
             setattr(self.tracks[track], param, value)
@@ -217,7 +217,7 @@ class DrumEngine:
                 should_render = self.playing
             elif param == "track_steps":
                 self._store_current_scene_locked()
-        if should_render:
+        if should_render and render_async:
             self.prepare_render_cache_async()
 
     def set_step_param(self, track: int, step: int, param: str, value):

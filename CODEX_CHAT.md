@@ -125,9 +125,10 @@ Implemented so far:
 - Fixed phase-varying LFO playback caching so Pan LFO and other LFO-driven patch movement render distinct step/ratchet phases instead of reusing a single fallback hit.
 - Reworked the Track Sound Design lower editor row so the Synthesis/Tone, Effects/Modulation/Step, and Signal panels resize with the window; signal graphs now expand vertically, while editor controls remain top-aligned. LFO Enabled toggles now have a consistent readable On-button size.
 - Rebalanced Track Sound Design lower panel widths so the Signal waveform, level, and spectrum plots receive more horizontal space while the Effects/Modulation/Step tabs stay compact.
-- Top-aligned the Envelope modulation source/depth controls so they stay pinned to the top as the Track Sound Design editor grows.
 - Added a Sequencer Clear All button that clears every pattern scene while preserving track sounds and scene names.
 - Restored live Song Mode sequencer-grid updates by adding a lightweight scene sync that refreshes only scene controls, step buttons, track labels, and the selected-step inspector.
+- Debounced Track Sound Design updates so rapid control changes no longer render signal previews or rebuild live playback caches on every dial tick, reducing UI lag and audio glitches while editing sounds.
+- Reworked the Envelope modulation page so Source and Depth sit side by side above a full-width Envelope Shape section, preventing group border overlap as the Track Sound Design area resizes.
 
 ## Verification Commands Used
 

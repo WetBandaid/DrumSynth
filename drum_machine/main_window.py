@@ -729,6 +729,10 @@ class MainWindow(QMainWindow):
         self.morph_summary_label: QLabel | None = None
         self.channel_analyzers: list[ChannelSpectrumDisplay] = []
         self.analyzer_average_spin: QSpinBox | None = None
+        self.preview_update_timers: dict[int, QTimer] = {}
+        self.render_cache_debounce_timer = QTimer(self)
+        self.render_cache_debounce_timer.setSingleShot(True)
+        self.render_cache_debounce_timer.timeout.connect(self._flush_render_cache_refresh)
         self.last_highlighted_step = -1
         self.last_synced_scene = -1
         self.last_song_position = -1
@@ -1762,27 +1766,28 @@ class MainWindow(QMainWindow):
 
     def _build_envelope_modulation_page(self):
         content = QWidget()
-        content.setMinimumHeight(150)
-        layout = QHBoxLayout(content)
+        content.setMinimumHeight(220)
+        content.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
+        layout.setAlignment(Qt.AlignTop)
 
-        control_column = QWidget()
-        control_column.setMinimumWidth(190)
-        control_column.setMaximumWidth(230)
-        control_column.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        control_layout = QVBoxLayout(control_column)
-        control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(4)
+        control_row = QHBoxLayout()
+        control_row.setContentsMargins(0, 0, 0, 0)
+        control_row.setSpacing(6)
 
         source_group = QGroupBox("Source")
+        source_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         source_form = self._form_layout(source_group)
         source_form.setContentsMargins(6, 8, 6, 6)
         source_form.setHorizontalSpacing(8)
         source_form.setVerticalSpacing(4)
-        control_layout.addWidget(source_group)
+        control_row.addWidget(source_group, 2)
 
         depth_group = QGroupBox("Depth")
+        depth_group.setMinimumWidth(112)
+        depth_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         depth_layout = QVBoxLayout(depth_group)
         depth_layout.setContentsMargins(6, 8, 6, 6)
         depth_layout.setSpacing(2)
@@ -1790,8 +1795,7 @@ class MainWindow(QMainWindow):
         depth_grid.setHorizontalSpacing(4)
         depth_grid.setVerticalSpacing(2)
         depth_layout.addLayout(depth_grid)
-        control_layout.addWidget(depth_group)
-        control_layout.addStretch(1)
+        control_row.addWidget(depth_group)
 
         graph_group = QGroupBox("Envelope Shape")
         graph_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1799,8 +1803,8 @@ class MainWindow(QMainWindow):
         graph_layout.setContentsMargins(6, 8, 6, 6)
         graph_layout.setSpacing(3)
 
-        layout.addWidget(control_column, alignment=Qt.AlignTop)
-        layout.addWidget(graph_group, 1)
+        layout.addLayout(control_row)
+        layout.addWidget(graph_group)
         return content, source_form, depth_grid, graph_layout
 
     def _add_global_dial(
@@ -1879,10 +1883,9 @@ class MainWindow(QMainWindow):
         def update(value):
             display = value / scale
             value_label.setText(self._format_value(param, display, value))
-            self.engine.set_track_param(
+            self._set_track_param_and_preview(
                 track_index, param, int(display) if param == "track_steps" else display
             )
-            self._update_waveform_preview(track_index)
 
         dial.valueChanged.connect(update)
         controls["dials"][param] = (dial, value_label, scale)
@@ -1924,7 +1927,7 @@ class MainWindow(QMainWindow):
         self._param_tip(button, param)
 
         def update(checked):
-            self.engine.set_track_param(track_index, param, checked)
+            self.engine.set_track_param(track_index, param, checked, render_async=False)
             if param in {"lfo_enabled", "lfo2_enabled", "env_mod_enabled"} and checked:
                 amount_param = {
                     "lfo_enabled": "lfo_amount",
@@ -1940,19 +1943,20 @@ class MainWindow(QMainWindow):
                     amount = getattr(self.engine.tracks[track_index], amount_param)
                     phase = getattr(self.engine.tracks[track_index], phase_param) if phase_param else 0.25
                 if abs(amount) < 0.001:
-                    self.engine.set_track_param(track_index, amount_param, 0.5)
+                    self.engine.set_track_param(track_index, amount_param, 0.5, render_async=False)
                     dial, value_label, scale = controls["dials"][amount_param]
                     dial.blockSignals(True)
                     dial.setValue(round(0.5 * scale))
                     value_label.setText(self._format_value(amount_param, 0.5, 50))
                     dial.blockSignals(False)
                 if phase_param and phase == 0.0:
-                    self.engine.set_track_param(track_index, phase_param, 0.25)
+                    self.engine.set_track_param(track_index, phase_param, 0.25, render_async=False)
                     spin, scale = controls["spins"][phase_param]
                     spin.blockSignals(True)
                     spin.setValue(0.25 * scale)
                     spin.blockSignals(False)
-            self._update_waveform_preview(track_index)
+            self._schedule_waveform_preview(track_index)
+            self._schedule_render_cache_refresh()
 
         button.toggled.connect(update)
         controls["checks"][param] = button
@@ -2418,9 +2422,33 @@ class MainWindow(QMainWindow):
         if spectrum is not None:
             spectrum.set_audio(audio)
 
+    def _schedule_waveform_preview(self, track_index: int):
+        if track_index >= len(self.track_widgets):
+            return
+        timer = self.preview_update_timers.get(track_index)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda tr=track_index: self._update_waveform_preview(tr))
+            self.preview_update_timers[track_index] = timer
+        timer.start(180)
+
+    def _schedule_render_cache_refresh(self):
+        with self.engine.lock:
+            playing = self.engine.playing
+        if playing:
+            self.render_cache_debounce_timer.start(180)
+
+    def _flush_render_cache_refresh(self):
+        with self.engine.lock:
+            playing = self.engine.playing
+        if playing:
+            self.engine.prepare_render_cache_async()
+
     def _set_track_param_and_preview(self, track_index: int, param: str, value):
-        self.engine.set_track_param(track_index, param, value)
-        self._update_waveform_preview(track_index)
+        self.engine.set_track_param(track_index, param, value, render_async=False)
+        self._schedule_waveform_preview(track_index)
+        self._schedule_render_cache_refresh()
 
     def _sync_step_editor(self, track_index: int, step: int):
         widgets = self.track_widgets[track_index]["step"]
