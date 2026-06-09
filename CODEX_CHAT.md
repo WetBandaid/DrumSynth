@@ -118,6 +118,14 @@ Implemented so far:
 - Fixed pattern clearing after morphing: Clear now resets hidden step expression data, clears stale voices/caches, and Fill mode no longer generates ghost hits from a fully blank pattern.
 - Reworked the top-right output meter into a compact live spectrum display fed by the final processed audio callback.
 - Improved the output spectrum analyzer's low-end response by feeding it from a rolling 4096-sample output buffer instead of the tiny audio callback block, giving sub/kick frequencies enough FFT resolution to move the low bands.
+- Added a main Analyzer tab with larger left/right channel spectrum displays, dB-style grid labels, frequency labels, green bars, magenta trace, and a selectable highlighted band.
+- Smoothed Analyzer low-end rendering by drawing contiguous bars and assigning nearest FFT-bin values to very narrow low-frequency bands. Song Mode now pre-renders the first slot before playback and warms caches for all scenes in the song chain to reduce pauses between sequences.
+- Further reduced Song Mode transition hiccups by pre-rendering the whole song chain before playback starts and making live scene changes use a lightweight UI refresh instead of rebuilding the sequencer grid, patch controls, and waveform previews at the bar boundary.
+- Added adjustable Analyzer trace averaging: green bars remain live, while the magenta trace now uses a smoothed running average with an Average Samples control.
+- Fixed phase-varying LFO playback caching so Pan LFO and other LFO-driven patch movement render distinct step/ratchet phases instead of reusing a single fallback hit.
+- Reworked the Track Sound Design lower editor row so the Synthesis/Tone, Effects/Modulation/Step, and Signal panels resize with the window; signal graphs now expand vertically, while editor controls remain top-aligned. LFO Enabled toggles now have a consistent readable On-button size.
+- Rebalanced Track Sound Design lower panel widths so the Signal waveform, level, and spectrum plots receive more horizontal space while the Effects/Modulation/Step tabs stay compact.
+- Top-aligned the Envelope modulation source/depth controls so they stay pinned to the top as the Track Sound Design editor grows.
 
 ## Verification Commands Used
 

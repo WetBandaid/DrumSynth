@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTabWidget,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -297,8 +298,8 @@ class WaveformPreview(QWidget):
     def __init__(self):
         super().__init__()
         self.samples = np.zeros(0, dtype=np.float32)
-        self.setFixedHeight(64)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(64)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setToolTip("Preview of the current patch waveform.")
 
     def set_audio(self, audio: np.ndarray):
@@ -346,9 +347,9 @@ class LevelProfilePreview(QWidget):
         self.levels = np.zeros(0, dtype=np.float32)
         self.peak = 0.0
         self.rms = 0.0
-        self.setFixedHeight(64)
+        self.setMinimumHeight(64)
         self.setMinimumWidth(180)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setToolTip("Shows the rendered patch level over time.")
 
     def set_audio(self, audio: np.ndarray):
@@ -412,9 +413,9 @@ class SpectrumPreview(QWidget):
     def __init__(self):
         super().__init__()
         self.bands = np.zeros(0, dtype=np.float32)
-        self.setFixedHeight(64)
+        self.setMinimumHeight(64)
         self.setMinimumWidth(180)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setToolTip("Shows the rendered patch frequency balance.")
 
     def set_audio(self, audio: np.ndarray):
@@ -511,6 +512,198 @@ class OutputSpectrumMeter(QWidget):
             painter.fillRect(int(x), int(top), int(bar_width), int(height), color)
 
 
+class ChannelSpectrumDisplay(QWidget):
+    def __init__(self, channel_name: str):
+        super().__init__()
+        self.channel_name = channel_name
+        self.bands_db = np.full(56, -72.0, dtype=np.float32)
+        self.average_bands_db = self.bands_db.copy()
+        self.average_window = 12
+        self.average_history: list[np.ndarray] = []
+        self.total_db = -72.0
+        self.selected_index = 24
+        self.edges = np.geomspace(25.0, SAMPLE_RATE * 0.45, len(self.bands_db) + 1)
+        self.setMinimumHeight(260)
+        self.setMouseTracking(True)
+        self.setToolTip("Live output spectrum for this channel. Green bars are current level; the magenta trace is averaged.")
+
+    def set_spectrum(self, bands_db: np.ndarray, total_db: float):
+        self.bands_db = np.asarray(bands_db, dtype=np.float32)
+        self.total_db = float(total_db)
+        if len(self.edges) != len(self.bands_db) + 1:
+            self.edges = np.geomspace(25.0, SAMPLE_RATE * 0.45, len(self.bands_db) + 1)
+            self.selected_index = min(self.selected_index, len(self.bands_db) - 1)
+            self.average_history.clear()
+            self.average_bands_db = self.bands_db.copy()
+        self._add_average_frame()
+        self.update()
+
+    def set_average_window(self, value: int):
+        self.average_window = int(np.clip(value, 1, 128))
+        self.average_history = self.average_history[-self.average_window :]
+        self._update_average_trace()
+        self.update()
+
+    def _add_average_frame(self):
+        if len(self.bands_db) == 0:
+            self.average_history.clear()
+            self.average_bands_db = self.bands_db.copy()
+            return
+        linear = np.power(10.0, self.bands_db / 20.0).astype(np.float32)
+        self.average_history.append(linear)
+        self.average_history = self.average_history[-self.average_window :]
+        self._update_average_trace()
+
+    def _update_average_trace(self):
+        if not self.average_history:
+            self.average_bands_db = self.bands_db.copy()
+            return
+        history = [frame for frame in self.average_history if len(frame) == len(self.bands_db)]
+        if not history:
+            self.average_history.clear()
+            self.average_bands_db = self.bands_db.copy()
+            return
+        averaged = np.mean(np.stack(history, axis=0), axis=0)
+        averaged_db = 20.0 * np.log10(np.maximum(averaged, 1.0e-6))
+        if len(averaged_db) >= 3:
+            padded = np.pad(averaged_db, (1, 1), mode="edge")
+            averaged_db = (
+                padded[:-2] * 0.22
+                + padded[1:-1] * 0.56
+                + padded[2:] * 0.22
+            )
+        self.average_bands_db = np.clip(averaged_db, -72.0, 6.0).astype(np.float32)
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#050607"))
+
+        graph = self._graph_rect()
+        min_db = -72.0
+        max_db = 6.0
+
+        selected = int(np.clip(self.selected_index, 0, max(0, len(self.bands_db) - 1)))
+        selected_freq = float(np.sqrt(self.edges[selected] * self.edges[selected + 1]))
+
+        painter.setPen(QPen(QColor("#9aa3ad"), 1))
+        painter.drawRect(graph)
+        for db in (-60, -48, -36, -24, -12, 0):
+            y = self._db_to_y(db, graph, min_db, max_db)
+            painter.setPen(QPen(QColor("#2d333a"), 1))
+            painter.drawLine(graph.left(), y, graph.right(), y)
+            painter.setPen(QPen(QColor("#c6ccd3"), 1))
+            painter.drawText(4, y + 4, f"{db}")
+
+        for freq in (25, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000):
+            x = self._freq_to_x(freq, graph)
+            painter.setPen(QPen(QColor("#3a414a"), 1))
+            painter.drawLine(x, graph.top(), x, graph.bottom())
+            if freq in (25, 100, 500, 1000, 5000, 10000, 20000):
+                label = self._format_frequency(freq)
+                metrics = painter.fontMetrics()
+                label_width = metrics.horizontalAdvance(label)
+                label_x = int(np.clip(x - label_width / 2, graph.left(), graph.right() - label_width))
+                painter.setPen(QPen(QColor("#c6ccd3"), 1))
+                painter.drawLine(x, graph.bottom() + 1, x, graph.bottom() + 5)
+                painter.drawText(label_x, graph.bottom() + 23, label)
+
+        painter.setPen(QPen(QColor("#c6ccd3"), 1))
+        painter.drawText(6, graph.top() - 6, "dB")
+        painter.drawText(graph.right() - 12, graph.bottom() + 37, "Hz")
+
+        if len(self.bands_db) == 0:
+            return
+
+        trace_points = []
+        for index, value in enumerate(self.bands_db):
+            left = self._freq_to_x(self.edges[index], graph)
+            right = self._freq_to_x(self.edges[index + 1], graph)
+            width = max(1, right - left + 1)
+            y = self._db_to_y(float(value), graph, min_db, max_db)
+            painter.fillRect(left, y, width, graph.bottom() - y, QColor("#00f03c"))
+            trace_value = float(self.average_bands_db[index])
+            trace_y = self._db_to_y(trace_value, graph, min_db, max_db)
+            trace_points.append(QPointF(left + max(1, width / 2), trace_y))
+
+        selected_x = self._freq_to_x(selected_freq, graph)
+        painter.setPen(QPen(QColor("#f2d16b"), 2))
+        painter.drawLine(selected_x, graph.top(), selected_x, graph.bottom())
+
+        painter.setPen(QPen(QColor("#ff2e78"), 2))
+        for start, end in zip(trace_points, trace_points[1:]):
+            painter.drawLine(start, end)
+        painter.setBrush(QColor("#ff2e78"))
+        for point in trace_points[::4]:
+            painter.drawEllipse(point, 2, 2)
+
+    def mouseMoveEvent(self, event):
+        self._set_selected_from_x(event.position().x())
+        self._show_selected_tooltip(event)
+
+    def mousePressEvent(self, event):
+        self._set_selected_from_x(event.position().x())
+        self._show_selected_tooltip(event)
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def _set_selected_from_x(self, x: float):
+        graph = self._graph_rect()
+        frequency = self._x_to_freq(x, graph)
+        centers = np.sqrt(self.edges[:-1] * self.edges[1:])
+        self.selected_index = int(np.argmin(np.abs(centers - frequency)))
+        self.update()
+
+    def _show_selected_tooltip(self, event):
+        graph = self._graph_rect()
+        if not graph.contains(event.position().toPoint()) or len(self.bands_db) == 0:
+            QToolTip.hideText()
+            return
+
+        index = int(np.clip(self.selected_index, 0, len(self.bands_db) - 1))
+        frequency = float(np.sqrt(self.edges[index] * self.edges[index + 1]))
+        db_value = float(self.average_bands_db[index]) if len(self.average_bands_db) else -72.0
+        text = f"{self._format_tooltip_frequency(frequency)}\n{db_value:.1f} dB avg"
+        global_position = (
+            event.globalPosition().toPoint()
+            if hasattr(event, "globalPosition")
+            else event.globalPos()
+        )
+        QToolTip.showText(global_position, text, self)
+
+    def _graph_rect(self):
+        return self.rect().adjusted(34, 18, -18, -42)
+
+    def _db_to_y(self, value: float, graph, min_db: float, max_db: float) -> int:
+        normalized = (float(np.clip(value, min_db, max_db)) - min_db) / (max_db - min_db)
+        return int(graph.bottom() - normalized * graph.height())
+
+    def _freq_to_x(self, frequency: float, graph) -> int:
+        low = np.log10(25.0)
+        high = np.log10(SAMPLE_RATE * 0.45)
+        normalized = (np.log10(float(np.clip(frequency, 25.0, SAMPLE_RATE * 0.45))) - low) / (high - low)
+        return int(graph.left() + normalized * graph.width())
+
+    def _x_to_freq(self, x: float, graph) -> float:
+        normalized = (float(x) - graph.left()) / max(1, graph.width())
+        low = np.log10(25.0)
+        high = np.log10(SAMPLE_RATE * 0.45)
+        return 10.0 ** (low + np.clip(normalized, 0.0, 1.0) * (high - low))
+
+    def _format_frequency(self, frequency: float) -> str:
+        if frequency >= 1000.0:
+            return f"{frequency / 1000.0:.1f}k"
+        return f"{frequency:.0f}"
+
+    def _format_tooltip_frequency(self, frequency: float) -> str:
+        if frequency >= 1000.0:
+            return f"{frequency / 1000.0:.2f} kHz"
+        return f"{frequency:.1f} Hz"
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -533,6 +726,8 @@ class MainWindow(QMainWindow):
         self.scene_name_edit: QLineEdit | None = None
         self.morph_scene_combos: list[QComboBox] = []
         self.morph_summary_label: QLabel | None = None
+        self.channel_analyzers: list[ChannelSpectrumDisplay] = []
+        self.analyzer_average_spin: QSpinBox | None = None
         self.last_highlighted_step = -1
         self.last_synced_scene = -1
         self.last_song_position = -1
@@ -552,8 +747,10 @@ class MainWindow(QMainWindow):
         self.main_tabs.setTabToolTip(0, "Edit the current pattern scene and global performance controls.")
         self.main_tabs.addTab(self._build_song_page(), "Song Mode")
         self.main_tabs.setTabToolTip(1, "Chain pattern scenes into a longer arrangement.")
+        self.main_tabs.addTab(self._build_analyzer_page(), "Analyzer")
+        self.main_tabs.setTabToolTip(2, "View the final output spectrum for left and right channels.")
         self.main_tabs.addTab(self._build_patch_page(), "Track Sound Design")
-        self.main_tabs.setTabToolTip(2, "Edit the drum sound, effects, modulation, and step expression for each track.")
+        self.main_tabs.setTabToolTip(3, "Edit the drum sound, effects, modulation, and step expression for each track.")
         layout.addWidget(self.main_tabs, 1)
 
         self._apply_style()
@@ -664,6 +861,41 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_song_tools())
         layout.addStretch(1)
         return page
+
+    def _build_analyzer_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        controls = QHBoxLayout()
+        controls.setSpacing(8)
+        controls.addWidget(QLabel("Average Samples"))
+        self.analyzer_average_spin = QSpinBox()
+        self.analyzer_average_spin.setRange(1, 128)
+        self.analyzer_average_spin.setValue(12)
+        self.analyzer_average_spin.setKeyboardTracking(False)
+        self.analyzer_average_spin.setFixedWidth(86)
+        self.analyzer_average_spin.setToolTip(
+            "Set how many analyzer frames the magenta trace averages."
+        )
+        self.analyzer_average_spin.valueChanged.connect(self._set_analyzer_average_window)
+        controls.addWidget(self.analyzer_average_spin)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.channel_analyzers = [
+            ChannelSpectrumDisplay("Left"),
+            ChannelSpectrumDisplay("Right"),
+        ]
+        self._set_analyzer_average_window(self.analyzer_average_spin.value())
+        for analyzer in self.channel_analyzers:
+            layout.addWidget(analyzer, 1)
+        return page
+
+    def _set_analyzer_average_window(self, value: int):
+        for analyzer in self.channel_analyzers:
+            analyzer.set_average_window(value)
 
     def _track_family(self, track_index: int) -> str:
         if track_index in {0, 5}:
@@ -1267,32 +1499,30 @@ class MainWindow(QMainWindow):
 
         editor_columns = QHBoxLayout()
         editor_columns.setSpacing(8)
-        layout.addLayout(editor_columns)
-        layout.addStretch(1)
+        layout.addLayout(editor_columns, 1)
 
         left_column = QVBoxLayout()
         left_column.setContentsMargins(0, 0, 0, 0)
         left_column.setSpacing(8)
         left_host = QWidget()
-        left_host.setMaximumWidth(520)
+        left_host.setMaximumWidth(430)
         left_host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         left_host.setLayout(left_column)
-        editor_columns.addWidget(left_host, alignment=Qt.AlignTop)
+        editor_columns.addWidget(left_host)
 
         right_host = QWidget()
         right_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         right_layout = QHBoxLayout(right_host)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
-        editor_columns.addWidget(right_host, 1, alignment=Qt.AlignTop)
+        editor_columns.addWidget(right_host, 1)
 
         editor_tabs = QTabWidget()
         editor_tabs.setDocumentMode(True)
         editor_tabs.setMinimumHeight(190)
-        editor_tabs.setMaximumHeight(260)
-        editor_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        editor_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         editor_tabs.setToolTip("Core synthesis and tone controls for this track.")
-        left_column.addWidget(editor_tabs)
+        left_column.addWidget(editor_tabs, 1)
 
         synthesis = QWidget()
         synthesis_form = self._form_layout(synthesis)
@@ -1307,18 +1537,15 @@ class MainWindow(QMainWindow):
         detail_tabs = QTabWidget()
         detail_tabs.setDocumentMode(True)
         detail_tabs.setMinimumHeight(190)
-        detail_tabs.setMaximumHeight(260)
-        detail_tabs.setMinimumWidth(540)
-        detail_tabs.setMaximumWidth(780)
-        detail_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        detail_tabs.setMinimumWidth(360)
+        detail_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         detail_tabs.setToolTip("Effects, modulation, and per-step expression controls for this track.")
-        right_layout.addWidget(detail_tabs)
+        right_layout.addWidget(detail_tabs, 1)
 
         signal_group = QGroupBox("Signal")
         signal_group.setProperty("soundPanel", True)
-        signal_group.setMinimumWidth(300)
-        signal_group.setMaximumHeight(260)
-        signal_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        signal_group.setMinimumWidth(360)
+        signal_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         signal_layout = QVBoxLayout(signal_group)
         signal_layout.setContentsMargins(8, 10, 8, 8)
         signal_layout.setSpacing(6)
@@ -1329,10 +1556,10 @@ class MainWindow(QMainWindow):
         controls["waveform"] = waveform
         controls["level_profile"] = level_profile
         controls["spectrum"] = spectrum
-        signal_layout.addWidget(waveform)
-        signal_layout.addWidget(level_profile)
-        signal_layout.addWidget(spectrum)
-        right_layout.addWidget(signal_group, 1)
+        signal_layout.addWidget(waveform, 1)
+        signal_layout.addWidget(level_profile, 1)
+        signal_layout.addWidget(spectrum, 1)
+        right_layout.addWidget(signal_group, 2)
 
         effects = QWidget()
         effects_form = self._form_layout(effects)
@@ -1346,6 +1573,7 @@ class MainWindow(QMainWindow):
         modulation_tabs = QTabWidget()
         modulation_tabs.setDocumentMode(True)
         modulation_tabs.setMinimumHeight(190)
+        modulation_tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         modulation_tabs.setToolTip("Switch between this patch's modulation sources.")
         modulation_layout.addWidget(modulation_tabs, 1)
         detail_tabs.addTab(modulation, "Modulation")
@@ -1523,12 +1751,11 @@ class MainWindow(QMainWindow):
         depth_grid = QGridLayout()
         depth_grid.setHorizontalSpacing(6)
         depth_grid.setVerticalSpacing(4)
-        depth_layout.addStretch(1)
         depth_layout.addLayout(depth_grid)
         depth_layout.addStretch(1)
 
-        layout.addWidget(source_group, 3)
-        layout.addWidget(depth_group)
+        layout.addWidget(source_group, 3, alignment=Qt.AlignTop)
+        layout.addWidget(depth_group, alignment=Qt.AlignTop)
         return self._scrollable_tab_page(content), source_form, depth_grid
 
     def _build_envelope_modulation_page(self):
@@ -1562,6 +1789,7 @@ class MainWindow(QMainWindow):
         depth_grid.setVerticalSpacing(2)
         depth_layout.addLayout(depth_grid)
         control_layout.addWidget(depth_group)
+        control_layout.addStretch(1)
 
         graph_group = QGroupBox("Envelope Shape")
         graph_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1569,7 +1797,7 @@ class MainWindow(QMainWindow):
         graph_layout.setContentsMargins(6, 8, 6, 6)
         graph_layout.setSpacing(3)
 
-        layout.addWidget(control_column)
+        layout.addWidget(control_column, alignment=Qt.AlignTop)
         layout.addWidget(graph_group, 1)
         return content, source_form, depth_grid, graph_layout
 
@@ -1688,6 +1916,9 @@ class MainWindow(QMainWindow):
         button = QToolButton()
         button.setText("On" if label == "Enabled" else label)
         button.setCheckable(True)
+        if label == "Enabled":
+            button.setMinimumSize(58, 24)
+            button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self._param_tip(button, param)
 
         def update(checked):
@@ -2127,6 +2358,27 @@ class MainWindow(QMainWindow):
             self._update_waveform_preview(track_index)
         self._sync_step_inspector()
 
+    def _sync_live_scene_from_engine(self):
+        with self.engine.lock:
+            current_scene = self.engine.current_scene
+            playing = self.engine.playing
+
+        for index, button in enumerate(self.scene_buttons):
+            button.blockSignals(True)
+            button.setChecked(index == current_scene)
+            button.blockSignals(False)
+
+        self.play_button.blockSignals(True)
+        self.play_button.setChecked(playing)
+        self.play_button.setText("Pause" if playing else "Play")
+        self.play_button.blockSignals(False)
+        self.last_synced_scene = current_scene
+
+        if self.pattern_track_combo is not None:
+            self.pattern_track_combo.blockSignals(True)
+            self.pattern_track_combo.setCurrentIndex(self.selected_pattern_track)
+            self.pattern_track_combo.blockSignals(False)
+
     def _update_waveform_preview(self, track_index: int):
         if track_index >= len(self.track_widgets):
             return
@@ -2225,7 +2477,7 @@ class MainWindow(QMainWindow):
 
     def _jump_to_selected_sound(self):
         self.track_tabs.setCurrentIndex(self.selected_pattern_track)
-        self.main_tabs.setCurrentIndex(2)
+        self.main_tabs.setCurrentIndex(3)
 
     def _sync_step_inspector(self):
         if not self.inspector_widgets:
@@ -2412,6 +2664,35 @@ class MainWindow(QMainWindow):
         for column in range(4):
             self.song_rows_layout.setColumnStretch(column, 1 if column in {1, 3} else 0)
         self.song_rows_layout.setRowStretch(len(song["chain"]) + 1, 1)
+
+    def _sync_song_playback_status(self):
+        with self.engine.lock:
+            song = self.engine.song_state()
+            playing = self.engine.playing
+
+        for index, label in enumerate(self.song_row_labels):
+            is_active = song["playing"] and index == song["position"]
+            if label.property("songActive") != is_active:
+                label.setProperty("songActive", is_active)
+                label.style().unpolish(label)
+                label.style().polish(label)
+
+        if self.song_loop_button is not None:
+            self.song_loop_button.blockSignals(True)
+            self.song_loop_button.setChecked(song["loop"])
+            self.song_loop_button.blockSignals(False)
+
+        if self.song_play_button is not None:
+            self.song_play_button.blockSignals(True)
+            self.song_play_button.setChecked(song["playing"] and playing)
+            self.song_play_button.setText("Pause Song" if song["playing"] and playing else "Play Song")
+            self.song_play_button.blockSignals(False)
+
+        if self.song_position_label is not None and song["chain"]:
+            position = song["position"] + 1
+            bars = max(1, song["chain"][song["position"]]["bars"])
+            progress = min(song["bar_progress"] + 1, bars)
+            self.song_position_label.setText(f"Slot {position}, bar {progress}/{bars}")
 
     def _add_song_slot(self):
         self.engine.add_song_slot()
@@ -2787,6 +3068,14 @@ class MainWindow(QMainWindow):
     def _refresh_playhead(self, force: bool = False):
         if hasattr(self, "output_meter"):
             self.output_meter.set_bands(self.engine.spectrum_levels())
+        if (
+            self.channel_analyzers
+            and hasattr(self, "main_tabs")
+            and self.main_tabs.currentIndex() == 2
+        ):
+            channel_bands, total_levels = self.engine.spectrum_channel_db_levels()
+            for index, analyzer in enumerate(self.channel_analyzers):
+                analyzer.set_spectrum(channel_bands[index], float(total_levels[index]))
 
         with self.engine.lock:
             visible_step = (self.engine.current_step - 1) % STEPS if self.engine.playing else 0
@@ -2796,9 +3085,16 @@ class MainWindow(QMainWindow):
             playing = self.engine.playing
 
         if current_scene != self.last_synced_scene:
-            self._sync_from_engine()
+            if playing and song_playing:
+                self._sync_live_scene_from_engine()
+                self._sync_song_playback_status()
+            else:
+                self._sync_from_engine()
         elif song_position != self.last_song_position or force:
-            self._sync_song_controls()
+            if playing and song_playing:
+                self._sync_song_playback_status()
+            else:
+                self._sync_song_controls()
         self.last_song_position = song_position
 
         if self.play_button.isChecked() != playing:

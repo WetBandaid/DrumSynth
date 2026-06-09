@@ -75,7 +75,8 @@ class DrumEngine:
         self.stream: sd.OutputStream | None = None
         self.compressor = BusCompressor()
         self.spectrum_bands = np.zeros(24, dtype=np.float32)
-        self.spectrum_buffer = np.zeros(4096, dtype=np.float32)
+        self.spectrum_channel_db = np.full((CHANNELS, 56), -72.0, dtype=np.float32)
+        self.spectrum_buffer = np.zeros((4096, CHANNELS), dtype=np.float32)
         self.spectrum_write_index = 0
         self.startup_generation = {}
         self.generate_startup_session()
@@ -125,11 +126,31 @@ class DrumEngine:
             write_index = self.spectrum_write_index
             buffer = self.spectrum_buffer.copy()
             previous = self.spectrum_bands.copy()
-        ordered = np.concatenate((buffer[write_index:], buffer[:write_index]))
+        ordered = np.concatenate((buffer[write_index:], buffer[:write_index]), axis=0)
         bands = output_spectrum_bands(ordered, len(previous))
         with self.lock:
             self.spectrum_bands = np.maximum(bands, previous * 0.82)
             return self.spectrum_bands.copy()
+
+    def spectrum_channel_db_levels(self, band_count: int = 56) -> tuple[np.ndarray, np.ndarray]:
+        with self.lock:
+            write_index = self.spectrum_write_index
+            buffer = self.spectrum_buffer.copy()
+            previous = self.spectrum_channel_db.copy()
+        ordered = np.concatenate((buffer[write_index:], buffer[:write_index]), axis=0)
+        bands = np.zeros((CHANNELS, band_count), dtype=np.float32)
+        totals = np.zeros(CHANNELS, dtype=np.float32)
+        for channel in range(CHANNELS):
+            channel_audio = ordered[:, channel]
+            bands[channel] = output_spectrum_db_bands(channel_audio, band_count)
+            rms = float(np.sqrt(np.mean(channel_audio * channel_audio)))
+            totals[channel] = 20.0 * np.log10(max(rms, 1.0e-6))
+        with self.lock:
+            if previous.shape == bands.shape:
+                self.spectrum_channel_db = np.maximum(bands, previous - 4.0)
+            else:
+                self.spectrum_channel_db = bands
+            return self.spectrum_channel_db.copy(), totals
 
     def set_global_param(self, param: str, value):
         should_render = False
@@ -814,11 +835,28 @@ class DrumEngine:
             self.song_position = int(np.clip(self.song_position, 0, len(self.song_chain) - 1))
             self.song_bar_progress = 0
             self.song_playing = True
-            self.playing = True
+            self.playing = False
             self.current_step = 0
             self.samples_until_step = 0
             self.transport_sample_position = 0
             self._load_song_slot_locked(self.song_position)
+            jobs = self._cache_jobs_locked()
+
+        rendered = []
+        for track_index, key, track, phase_key, global_fx_amount in jobs:
+            rendered.append(
+                (
+                    track_index,
+                    key,
+                    self._render_track_copy(track, phase_key, global_fx_amount),
+                )
+            )
+
+        with self.lock:
+            for track_index, key, audio in rendered:
+                self.render_cache[key] = audio
+                self.fallback_hits[track_index] = audio
+            self.playing = True
 
     def stop_song(self):
         with self.lock:
@@ -840,7 +878,11 @@ class DrumEngine:
             if cached is not None:
                 self.voices.append(SampleVoice(cached))
                 return
-            if self.playing and track_index in self.fallback_hits:
+            if (
+                self.playing
+                and track_index in self.fallback_hits
+                and not self._has_lfo_phase_variation(track_snapshot)
+            ):
                 self.voices.append(SampleVoice(self.fallback_hits[track_index]))
                 return
             render_job = (track_index, key, track_snapshot, phase_key, global_fx_amount)
@@ -869,7 +911,12 @@ class DrumEngine:
             if cached is not None:
                 self.voices.append(SampleVoice(cached))
                 return
-            if self.playing and track_index in self.fallback_hits and not self._has_note_overrides(source_track):
+            if (
+                self.playing
+                and track_index in self.fallback_hits
+                and not self._has_note_overrides(source_track)
+                and not self._has_lfo_phase_variation(track_snapshot)
+            ):
                 self.voices.append(SampleVoice(self.fallback_hits[track_index]))
                 return
             render_job = (track_index, key, track_snapshot, phase_key, global_fx_amount)
@@ -1439,10 +1486,44 @@ class DrumEngine:
         return int.from_bytes(digest, "little")
 
     def _cache_jobs_locked(self):
-        jobs = []
+        jobs = {}
         global_fx_amount = float(self.global_fx_amount)
         transport_position = self.transport_sample_position
-        for track_index, track in enumerate(self.tracks):
+        self._collect_cache_jobs_for_tracks_locked(
+            jobs,
+            self.tracks,
+            transport_position,
+            global_fx_amount,
+        )
+
+        if self.song_playing and self.song_chain:
+            base_tracks = copy.deepcopy(self.tracks)
+            scene_start_position = transport_position
+            for slot in self.song_chain:
+                scene_index = int(np.clip(slot["scene"], 0, PATTERN_SCENES - 1))
+                scene_tracks = copy.deepcopy(base_tracks)
+                for track, data in zip(scene_tracks, self.pattern_scenes[scene_index].get("tracks", [])):
+                    self._load_track_pattern_locked(track, data)
+                self._collect_cache_jobs_for_tracks_locked(
+                    jobs,
+                    scene_tracks,
+                    scene_start_position,
+                    global_fx_amount,
+                )
+                scene_start_position += sum(
+                    self._step_samples(step)
+                    for step in range(int(np.clip(slot["bars"], 1, 16)) * STEPS)
+                )
+        return list(jobs.values())
+
+    def _collect_cache_jobs_for_tracks_locked(
+        self,
+        jobs: dict[tuple, tuple],
+        tracks,
+        transport_position: int,
+        global_fx_amount: float,
+    ):
+        for track_index, track in enumerate(tracks):
             if not any(track.pattern):
                 continue
             active_steps = [
@@ -1450,20 +1531,27 @@ class DrumEngine:
                 for step, enabled in enumerate(track.pattern)
                 if enabled and step < max(1, track.track_steps)
             ]
-            if not self._has_note_overrides(track):
+            phase_variant = self._has_lfo_phase_variation(track)
+            if not self._has_note_overrides(track) and not phase_variant:
                 active_steps = active_steps[:1]
             for step in active_steps:
                 track_snapshot = self._render_track_for_step(track, step)
-                phase = self._lfo_phases_for_track(track_snapshot, transport_position)
-                key, phase_key = self._cache_key_for_track(
-                    track_index,
-                    track_snapshot,
-                    phase,
-                    global_fx_amount,
-                )
-                if key not in self.render_cache:
-                    jobs.append((track_index, key, track_snapshot, phase_key, global_fx_amount))
-        return jobs
+                step_position = transport_position + sum(self._step_samples(index) for index in range(step))
+                repeats = int(np.clip(track.ratchets[step % STEPS], 1, 4)) if phase_variant else 1
+                spacing = max(1, self._step_samples(step) // repeats)
+                for repeat in range(repeats):
+                    phase = self._lfo_phases_for_track(
+                        track_snapshot,
+                        step_position + repeat * spacing,
+                    )
+                    key, phase_key = self._cache_key_for_track(
+                        track_index,
+                        track_snapshot,
+                        phase,
+                        global_fx_amount,
+                    )
+                    if key not in self.render_cache and key not in jobs:
+                        jobs[key] = (track_index, key, track_snapshot, phase_key, global_fx_amount)
 
     def _background_render_cache(self):
         while True:
@@ -1506,7 +1594,12 @@ class DrumEngine:
         render_track = self._render_track_for_step(source_track, step)
         key, phase_key = self._cache_key_for_track(track_index, render_track, lfo_phase)
         if key not in self.render_cache:
-            if self.playing and track_index in self.fallback_hits and not self._has_note_overrides(source_track):
+            if (
+                self.playing
+                and track_index in self.fallback_hits
+                and not self._has_note_overrides(source_track)
+                and not self._has_lfo_phase_variation(render_track)
+            ):
                 return self.fallback_hits[track_index]
             self.render_cache[key] = self._render_track_copy(
                 render_track,
@@ -1541,6 +1634,15 @@ class DrumEngine:
             bool(value) for value in getattr(track, "bass_note_enabled", [True] * STEPS)
         )
 
+    def _has_lfo_phase_variation(self, track) -> bool:
+        return (
+            bool(getattr(track, "lfo_enabled", False))
+            and float(getattr(track, "lfo_amount", 0.0)) > 0.0
+        ) or (
+            bool(getattr(track, "lfo2_enabled", False))
+            and float(getattr(track, "lfo2_amount", 0.0)) > 0.0
+        )
+
     def _midi_to_frequency(self, note: int) -> float:
         return 440.0 * (2.0 ** ((int(note) - 69) / 12.0))
 
@@ -1552,7 +1654,11 @@ class DrumEngine:
         track = self.tracks[track_index]
         key, phase_key = self._cache_key_for_track(track_index, track, lfo_phase)
         if key not in self.render_cache:
-            if self.playing and track_index in self.fallback_hits:
+            if (
+                self.playing
+                and track_index in self.fallback_hits
+                and not self._has_lfo_phase_variation(track)
+            ):
                 return self.fallback_hits[track_index]
             self.render_cache[key] = self._render_track_copy(
                 track,
@@ -1748,19 +1854,21 @@ class DrumEngine:
         outdata[:] = processed
 
     def _append_spectrum_samples_locked(self, block: np.ndarray):
-        mono = block.mean(axis=1).astype(np.float32, copy=False)
-        count = len(mono)
+        samples = block.astype(np.float32, copy=False)
+        if samples.ndim == 1:
+            samples = np.column_stack((samples, samples))
+        count = len(samples)
         if count >= len(self.spectrum_buffer):
-            self.spectrum_buffer[:] = mono[-len(self.spectrum_buffer) :]
+            self.spectrum_buffer[:] = samples[-len(self.spectrum_buffer) :, :CHANNELS]
             self.spectrum_write_index = 0
             return
         end = self.spectrum_write_index + count
         if end <= len(self.spectrum_buffer):
-            self.spectrum_buffer[self.spectrum_write_index:end] = mono
+            self.spectrum_buffer[self.spectrum_write_index:end] = samples[:, :CHANNELS]
         else:
             first = len(self.spectrum_buffer) - self.spectrum_write_index
-            self.spectrum_buffer[self.spectrum_write_index:] = mono[:first]
-            self.spectrum_buffer[: end % len(self.spectrum_buffer)] = mono[first:]
+            self.spectrum_buffer[self.spectrum_write_index:] = samples[:first, :CHANNELS]
+            self.spectrum_buffer[: end % len(self.spectrum_buffer)] = samples[first:, :CHANNELS]
         self.spectrum_write_index = end % len(self.spectrum_buffer)
 
 
@@ -1781,6 +1889,33 @@ def output_spectrum_bands(block: np.ndarray, band_count: int = 24) -> np.ndarray
         bands = np.log1p(bands)
         bands /= max(float(np.max(bands)), 0.001)
     return bands.astype(np.float32)
+
+
+def output_spectrum_db_bands(block: np.ndarray, band_count: int = 56) -> np.ndarray:
+    if len(block) < 8:
+        return np.full(band_count, -72.0, dtype=np.float32)
+    mono = block.mean(axis=1).astype(np.float32, copy=False) if block.ndim == 2 else block.astype(np.float32, copy=False)
+    window = np.hanning(len(mono)).astype(np.float32)
+    magnitudes = np.abs(np.fft.rfft(mono * window))
+    magnitudes /= max(float(np.sum(window) * 0.5), 1.0)
+    frequencies = np.fft.rfftfreq(len(mono), 1.0 / SAMPLE_RATE)
+    edges = np.geomspace(25.0, SAMPLE_RATE * 0.45, band_count + 1)
+    bands = np.full(band_count, -72.0, dtype=np.float32)
+    for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+        mask = (frequencies >= low) & (frequencies < high)
+        if np.any(mask):
+            level = float(np.sqrt(np.mean(magnitudes[mask] * magnitudes[mask])))
+        else:
+            center = float(np.sqrt(low * high))
+            nearest = int(np.argmin(np.abs(frequencies - center)))
+            level = float(magnitudes[nearest])
+            if nearest > 0:
+                level = max(level, float(magnitudes[nearest - 1]) * 0.45)
+            if nearest + 1 < len(magnitudes):
+                level = max(level, float(magnitudes[nearest + 1]) * 0.45)
+        if level > 0.0:
+            bands[index] = 20.0 * np.log10(max(level, 1.0e-6))
+    return np.clip(bands, -72.0, 6.0).astype(np.float32)
 
 
 def apply_global_filter(block: np.ndarray, cutoff: float, resonance: float) -> np.ndarray:
