@@ -1418,7 +1418,7 @@ class MainWindow(QMainWindow):
         controls["header_badges"] = badge
         title_column.addWidget(title)
         title_column.addWidget(badge)
-        header_layout.addLayout(title_column, 1)
+        header_layout.addLayout(title_column)
 
         instrument = QComboBox()
         instrument.addItems(DRUM_PRESET_NAMES)
@@ -1476,6 +1476,7 @@ class MainWindow(QMainWindow):
         )
         controls["solo"] = solo
         header_layout.addWidget(solo)
+        header_layout.addStretch(1)
         layout.addWidget(header)
 
         dials_group = QGroupBox("Performance")
