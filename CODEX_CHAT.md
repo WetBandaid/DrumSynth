@@ -126,6 +126,8 @@ Implemented so far:
 - Reworked the Track Sound Design lower editor row so the Synthesis/Tone, Effects/Modulation/Step, and Signal panels resize with the window; signal graphs now expand vertically, while editor controls remain top-aligned. LFO Enabled toggles now have a consistent readable On-button size.
 - Rebalanced Track Sound Design lower panel widths so the Signal waveform, level, and spectrum plots receive more horizontal space while the Effects/Modulation/Step tabs stay compact.
 - Top-aligned the Envelope modulation source/depth controls so they stay pinned to the top as the Track Sound Design editor grows.
+- Added a Sequencer Clear All button that clears every pattern scene while preserving track sounds and scene names.
+- Restored live Song Mode sequencer-grid updates by adding a lightweight scene sync that refreshes only scene controls, step buttons, track labels, and the selected-step inspector.
 
 ## Verification Commands Used
 

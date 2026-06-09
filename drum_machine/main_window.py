@@ -69,6 +69,7 @@ CONTROL_TOOLTIPS = {
     "copy_scene": "Copy the current scene pattern data.",
     "paste_scene": "Paste copied scene pattern data into the current scene.",
     "clear_scene": "Clear all tracks in the current scene.",
+    "clear_all_patterns": "Clear every pattern scene while keeping track sounds and scene names.",
     "scene_name": "Name the current scene for easier arranging and morphing.",
     "pattern_track": "Choose which track the copy, paste, clear, and rotate tools edit.",
     "copy_track": "Copy the selected track pattern and step expression data.",
@@ -1094,6 +1095,7 @@ class MainWindow(QMainWindow):
             ("Copy Scene", self._copy_scene, "copy_scene"),
             ("Paste Scene", self._paste_scene, "paste_scene"),
             ("Clear Scene", self._clear_scene, "clear_scene"),
+            ("Clear All", self._clear_all_patterns, "clear_all_patterns"),
         ):
             button = QPushButton(text)
             self._set_tip(button, tip_key)
@@ -2289,25 +2291,9 @@ class MainWindow(QMainWindow):
             self.pattern_track_combo.setCurrentIndex(self.selected_pattern_track)
             self.pattern_track_combo.blockSignals(False)
 
-        for track_index, track in enumerate(tracks):
-            for step, enabled in enumerate(track.pattern):
-                button = self.step_buttons[track_index][step]
-                button.blockSignals(True)
-                button.setChecked(enabled)
-                button.setProperty("accent", step % 4 == 0)
-                button.setProperty(
-                    "selectedStep",
-                    track_index == self.selected_pattern_track and step == self.selected_step,
-                )
-                button.setText(
-                    self._note_name(track.bass_notes[step])
-                    if enabled
-                    else str(step + 1)
-                )
-                button.style().unpolish(button)
-                button.style().polish(button)
-                button.blockSignals(False)
+        self._sync_sequencer_grid(tracks)
 
+        for track_index, track in enumerate(tracks):
             widgets = self.track_widgets[track_index]
             widgets["instrument"].blockSignals(True)
             widgets["instrument"].setCurrentText(track.instrument)
@@ -2358,15 +2344,44 @@ class MainWindow(QMainWindow):
             self._update_waveform_preview(track_index)
         self._sync_step_inspector()
 
+    def _sync_sequencer_grid(self, tracks):
+        for track_index, track in enumerate(tracks):
+            for step, enabled in enumerate(track.pattern):
+                button = self.step_buttons[track_index][step]
+                button.blockSignals(True)
+                button.setChecked(enabled)
+                button.setProperty("accent", step % 4 == 0)
+                button.setProperty(
+                    "selectedStep",
+                    track_index == self.selected_pattern_track and step == self.selected_step,
+                )
+                button.setText(
+                    self._note_name(track.bass_notes[step])
+                    if enabled
+                    else str(step + 1)
+                )
+                button.style().unpolish(button)
+                button.style().polish(button)
+                button.blockSignals(False)
+
+            badges = self._track_badges(track)
+            self.track_labels[track_index].setText(
+                f"{track.instrument} {' '.join(badges)}" if badges else track.instrument
+            )
+
     def _sync_live_scene_from_engine(self):
         with self.engine.lock:
             current_scene = self.engine.current_scene
             playing = self.engine.playing
+            tracks = copy.deepcopy(self.engine.tracks)
 
         for index, button in enumerate(self.scene_buttons):
             button.blockSignals(True)
             button.setChecked(index == current_scene)
             button.blockSignals(False)
+        self._sync_scene_name_controls()
+        self._sync_sequencer_grid(tracks)
+        self._sync_step_inspector()
 
         self.play_button.blockSignals(True)
         self.play_button.setChecked(playing)
@@ -2759,6 +2774,19 @@ class MainWindow(QMainWindow):
 
     def _clear_scene(self):
         self.engine.clear_scene()
+        self._sync_from_engine()
+
+    def _clear_all_patterns(self):
+        reply = QMessageBox.question(
+            self,
+            "Clear all patterns?",
+            "Clear every pattern scene? Track sounds and scene names will be kept.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.engine.clear_all_patterns()
         self._sync_from_engine()
 
     def _copy_track_pattern(self):

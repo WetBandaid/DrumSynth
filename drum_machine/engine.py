@@ -693,6 +693,31 @@ class DrumEngine:
             self.fallback_hits.clear()
             self._store_current_scene_locked()
 
+    def clear_all_patterns(self):
+        with self.lock:
+            empty_scene = {
+                "tracks": [
+                    self._snapshot_track_pattern_locked(track)
+                    for track in self.tracks
+                ]
+            }
+            for track_data in empty_scene["tracks"]:
+                track_data["pattern"] = [False] * STEPS
+                track_data["velocities"] = [1.0] * STEPS
+                track_data["probabilities"] = [1.0] * STEPS
+                track_data["ratchets"] = [1] * STEPS
+                track_data["bass_notes"] = [36] * STEPS
+                track_data["bass_note_enabled"] = [False] * STEPS
+            self.pattern_scenes = [copy.deepcopy(empty_scene) for _ in range(PATTERN_SCENES)]
+            self._load_scene_locked(self.pattern_scenes[self.current_scene])
+            self.voices.clear()
+            self.scheduled.clear()
+            self.current_step = 0
+            self.samples_until_step = 0
+            self.transport_sample_position = 0
+            self.render_cache.clear()
+            self.fallback_hits.clear()
+
     def copy_track_pattern(self, track_index: int):
         with self.lock:
             self.track_clipboard = self._snapshot_track_pattern_locked(self.tracks[track_index])
