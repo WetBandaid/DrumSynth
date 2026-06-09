@@ -74,6 +74,9 @@ class DrumEngine:
         self.render_random_lock = threading.Lock()
         self.stream: sd.OutputStream | None = None
         self.compressor = BusCompressor()
+        self.spectrum_bands = np.zeros(24, dtype=np.float32)
+        self.spectrum_buffer = np.zeros(4096, dtype=np.float32)
+        self.spectrum_write_index = 0
         self.startup_generation = {}
         self.generate_startup_session()
 
@@ -116,6 +119,17 @@ class DrumEngine:
     def set_master_volume(self, volume: float):
         with self.lock:
             self.master_volume = float(np.clip(volume, 0.0, 1.0))
+
+    def spectrum_levels(self) -> np.ndarray:
+        with self.lock:
+            write_index = self.spectrum_write_index
+            buffer = self.spectrum_buffer.copy()
+            previous = self.spectrum_bands.copy()
+        ordered = np.concatenate((buffer[write_index:], buffer[:write_index]))
+        bands = output_spectrum_bands(ordered, len(previous))
+        with self.lock:
+            self.spectrum_bands = np.maximum(bands, previous * 0.82)
+            return self.spectrum_bands.copy()
 
     def set_global_param(self, param: str, value):
         should_render = False
@@ -226,7 +240,13 @@ class DrumEngine:
     def clear_pattern(self):
         with self.lock:
             for track in self.tracks:
-                track.pattern = [False] * STEPS
+                self._reset_track_pattern_locked(track)
+            self.voices.clear()
+            self.scheduled.clear()
+            self.current_step = 0
+            self.samples_until_step = 0
+            self.render_cache.clear()
+            self.fallback_hits.clear()
             self._store_current_scene_locked()
 
     def load_default_pattern(self):
@@ -645,12 +665,11 @@ class DrumEngine:
     def clear_scene(self):
         with self.lock:
             for track in self.tracks:
-                track.pattern = [False] * STEPS
-                track.velocities = [1.0] * STEPS
-                track.probabilities = [1.0] * STEPS
-                track.ratchets = [1] * STEPS
-                track.bass_notes = [36] * STEPS
-                track.bass_note_enabled = [False] * STEPS
+                self._reset_track_pattern_locked(track)
+            self.voices.clear()
+            self.scheduled.clear()
+            self.render_cache.clear()
+            self.fallback_hits.clear()
             self._store_current_scene_locked()
 
     def copy_track_pattern(self, track_index: int):
@@ -668,12 +687,7 @@ class DrumEngine:
     def clear_track_pattern(self, track_index: int):
         with self.lock:
             track = self.tracks[track_index]
-            track.pattern = [False] * STEPS
-            track.velocities = [1.0] * STEPS
-            track.probabilities = [1.0] * STEPS
-            track.ratchets = [1] * STEPS
-            track.bass_notes = [36] * STEPS
-            track.bass_note_enabled = [False] * STEPS
+            self._reset_track_pattern_locked(track)
             self._store_current_scene_locked()
 
     def rotate_track_pattern(self, track_index: int, amount: int):
@@ -887,6 +901,213 @@ class DrumEngine:
         if start_thread:
             self.cache_render_thread.start()
 
+    def render_current_pattern(self, bars: int = 4, tail_seconds: float = 3.0) -> np.ndarray:
+        bars = int(np.clip(bars, 1, 64))
+        with self.lock:
+            tracks = copy.deepcopy(self.tracks)
+            state = self._offline_render_state_locked()
+        return self._render_offline_sections([(tracks, bars)], state, tail_seconds)
+
+    def render_song_arrangement(self, tail_seconds: float = 3.0) -> np.ndarray:
+        with self.lock:
+            self._store_current_scene_locked()
+            base_tracks = copy.deepcopy(self.tracks)
+            scenes = copy.deepcopy(self.pattern_scenes)
+            chain = self._fit_song_chain(copy.deepcopy(self.song_chain))
+            state = self._offline_render_state_locked()
+
+        sections = []
+        for slot in chain:
+            tracks = copy.deepcopy(base_tracks)
+            scene = scenes[int(np.clip(slot["scene"], 0, PATTERN_SCENES - 1))]
+            for track, data in zip(tracks, scene.get("tracks", [])):
+                self._load_track_pattern_locked(track, data)
+            sections.append((tracks, int(np.clip(slot["bars"], 1, 16))))
+        return self._render_offline_sections(sections, state, tail_seconds)
+
+    def _offline_render_state_locked(self) -> dict:
+        return {
+            "bpm": float(self.bpm),
+            "swing": float(self.swing),
+            "master_volume": float(self.master_volume),
+            "compressor_amount": float(self.compressor_amount),
+            "global_filter_cutoff": float(self.global_filter_cutoff),
+            "global_filter_resonance": float(self.global_filter_resonance),
+            "global_drive": float(self.global_drive),
+            "global_fx_amount": float(self.global_fx_amount),
+            "global_density": float(self.global_density),
+            "global_humanize": float(self.global_humanize),
+            "fill_enabled": bool(self.fill_enabled),
+        }
+
+    def _render_offline_sections(
+        self,
+        sections: list[tuple[list, int]],
+        state: dict,
+        tail_seconds: float,
+    ) -> np.ndarray:
+        step_lengths = []
+        for _tracks, bars in sections:
+            for step in range(max(1, bars) * STEPS):
+                step_lengths.append(self._step_samples_for_state(step, state))
+
+        tail_samples = max(0, int(float(np.clip(tail_seconds, 0.0, 12.0)) * SAMPLE_RATE))
+        total_samples = max(1, sum(step_lengths) + tail_samples)
+        dry = np.zeros((total_samples, CHANNELS), dtype=np.float32)
+        rng = np.random.default_rng(42_409)
+        render_cache: dict[tuple, np.ndarray] = {}
+        transport_position = 0
+
+        for tracks, bars in sections:
+            section_steps = max(1, bars) * STEPS
+            solo_active = any(track.solo for track in tracks)
+            pattern_has_activity = self._patterns_have_activity(tracks)
+            for step in range(section_steps):
+                step_samples = self._step_samples_for_state(step, state)
+                for track_index, track in enumerate(tracks):
+                    local_step = step % max(1, track.track_steps)
+                    audible = track.solo if solo_active else not track.muted
+                    probability = float(np.clip(track.probabilities[local_step], 0.0, 1.0))
+                    probability *= float(np.clip(state["global_density"], 0.0, 1.5))
+                    ratchets = int(np.clip(track.ratchets[local_step], 1, 4))
+                    active = track.pattern[local_step]
+                    fill_velocity_scale = 1.0
+                    if pattern_has_activity:
+                        active, probability, ratchets, fill_velocity_scale = self._offline_fill_step_settings(
+                            state,
+                            track_index,
+                            local_step,
+                            active,
+                            probability,
+                            ratchets,
+                        )
+                    if not (
+                        audible
+                        and active
+                        and track.volume > 0.0
+                        and rng.random() <= probability
+                    ):
+                        continue
+
+                    spacing = max(1, step_samples // ratchets)
+                    for repeat in range(ratchets):
+                        event_position = transport_position + repeat * spacing
+                        phase = self._lfo_phases_for_track(track, event_position)
+                        velocity = track.velocities[local_step] * fill_velocity_scale
+                        if repeat > 0:
+                            velocity *= 0.72**repeat
+                        if state["global_humanize"] > 0.0:
+                            spread = float(np.clip(state["global_humanize"], 0.0, 1.0)) * 0.35
+                            velocity *= float(rng.uniform(1.0 - spread, 1.0 + spread))
+                        hit = self._render_offline_step_hit(
+                            track_index,
+                            track,
+                            local_step,
+                            phase,
+                            state["global_fx_amount"],
+                            render_cache,
+                        )
+                        start = event_position
+                        end = min(total_samples, start + len(hit))
+                        if end > start:
+                            dry[start:end] += hit[: end - start] * velocity
+                transport_position += step_samples
+
+        return self._process_master_offline(dry, state)
+
+    def _render_offline_step_hit(
+        self,
+        track_index: int,
+        track,
+        step: int,
+        lfo_phase,
+        global_fx_amount: float,
+        render_cache: dict[tuple, np.ndarray],
+    ) -> np.ndarray:
+        render_track = self._render_track_for_step(track, step)
+        key, phase_key = self._cache_key_for_track(
+            track_index,
+            render_track,
+            lfo_phase,
+            global_fx_amount,
+        )
+        if key not in render_cache:
+            render_cache[key] = self._render_track_copy(render_track, phase_key, global_fx_amount)
+        return render_cache[key]
+
+    def _offline_fill_step_settings(
+        self,
+        state: dict,
+        track_index: int,
+        local_step: int,
+        active: bool,
+        probability: float,
+        ratchets: int,
+    ) -> tuple[bool, float, int, float]:
+        if not state["fill_enabled"]:
+            return active, probability, ratchets, 1.0
+
+        step_in_bar = local_step % STEPS
+        last_beat = step_in_bar in {12, 13, 14, 15}
+        final_turn = step_in_bar in {14, 15}
+        ghost_active = active
+        velocity_scale = 1.0
+
+        if track_index in {0, 1, 4}:
+            return active, probability, ratchets, velocity_scale
+
+        if active:
+            probability = max(probability, 0.9 if last_beat else probability)
+            if final_turn and track_index in {2, 6, 7}:
+                ratchets = max(ratchets, 2)
+            return ghost_active, probability, ratchets, velocity_scale
+
+        fill_chance = 0.0
+        if track_index == 2 and step_in_bar in {13, 15}:
+            fill_chance = 0.68
+            velocity_scale = 0.52
+            ratchets = 2 if step_in_bar == 15 else 1
+        elif track_index == 3 and step_in_bar == 15:
+            fill_chance = 0.32
+            velocity_scale = 0.42
+        elif track_index in {6, 7} and final_turn:
+            fill_chance = 0.42
+            velocity_scale = 0.5
+            ratchets = 2 if step_in_bar == 15 else 1
+        elif track_index == 5 and step_in_bar == 15:
+            fill_chance = 0.28
+            velocity_scale = 0.48
+
+        if fill_chance <= 0.0:
+            return active, probability, ratchets, velocity_scale
+        return True, fill_chance, ratchets, velocity_scale
+
+    def _process_master_offline(self, dry: np.ndarray, state: dict) -> np.ndarray:
+        mix = dry * state["master_volume"]
+        mix = apply_global_filter(
+            mix,
+            state["global_filter_cutoff"],
+            state["global_filter_resonance"],
+        )
+        drive = float(np.clip(state["global_drive"], 0.0, 1.0))
+        if drive > 0.0:
+            mix = np.tanh(mix * (1.0 + drive * 5.0))
+        return BusCompressor().process(mix, state["compressor_amount"])
+
+    def _step_samples_for_state(self, step: int, state: dict) -> int:
+        beat_seconds = 60.0 / max(float(state["bpm"]), 1.0)
+        base = beat_seconds / 4.0
+        swing_amount = float(np.clip(state["swing"], 0.0, 0.45)) * 0.45
+        multiplier = 1.0 + swing_amount if step % 2 == 0 else 1.0 - swing_amount
+        return max(1, int(base * multiplier * SAMPLE_RATE))
+
+    def _patterns_have_activity(self, tracks) -> bool:
+        for track in tracks:
+            length = max(1, int(np.clip(track.track_steps, 1, STEPS)))
+            if any(track.pattern[:length]):
+                return True
+        return False
+
     def _make_initial_scenes(self) -> list[dict]:
         first = self._snapshot_pattern_locked()
         scenes = [first]
@@ -953,6 +1174,14 @@ class DrumEngine:
             "bass_note_enabled": [bool(value) for value in track.bass_note_enabled],
             "track_steps": int(track.track_steps),
         }
+
+    def _reset_track_pattern_locked(self, track):
+        track.pattern = [False] * STEPS
+        track.velocities = [1.0] * STEPS
+        track.probabilities = [1.0] * STEPS
+        track.ratchets = [1] * STEPS
+        track.bass_notes = [36] * STEPS
+        track.bass_note_enabled = [False] * STEPS
 
     def _load_scene_locked(self, scene: dict):
         for track, data in zip(self.tracks, scene.get("tracks", [])):
@@ -1411,6 +1640,7 @@ class DrumEngine:
         step = self.current_step
         step_samples = self._step_samples(step)
         solo_active = any(track.solo for track in self.tracks)
+        pattern_has_activity = self._patterns_have_activity(self.tracks)
 
         for track_index, track in enumerate(self.tracks):
             local_step = step % max(1, track.track_steps)
@@ -1418,13 +1648,16 @@ class DrumEngine:
             probability = float(np.clip(track.probabilities[local_step], 0.0, 1.0))
             probability *= float(np.clip(self.global_density, 0.0, 1.5))
             ratchets = int(np.clip(track.ratchets[local_step], 1, 4))
-            active, probability, ratchets, fill_velocity_scale = self._fill_step_settings(
-                track_index,
-                local_step,
-                track.pattern[local_step],
-                probability,
-                ratchets,
-            )
+            active = track.pattern[local_step]
+            fill_velocity_scale = 1.0
+            if pattern_has_activity:
+                active, probability, ratchets, fill_velocity_scale = self._fill_step_settings(
+                    track_index,
+                    local_step,
+                    active,
+                    probability,
+                    ratchets,
+                )
             should_play = (
                 audible
                 and active
@@ -1509,7 +1742,45 @@ class DrumEngine:
         mix = apply_global_filter(mix, filter_cutoff, filter_resonance)
         if drive > 0.0:
             mix = np.tanh(mix * (1.0 + float(np.clip(drive, 0.0, 1.0)) * 5.0))
-        outdata[:] = self.compressor.process(mix, compressor_amount)
+        processed = self.compressor.process(mix, compressor_amount)
+        with self.lock:
+            self._append_spectrum_samples_locked(processed)
+        outdata[:] = processed
+
+    def _append_spectrum_samples_locked(self, block: np.ndarray):
+        mono = block.mean(axis=1).astype(np.float32, copy=False)
+        count = len(mono)
+        if count >= len(self.spectrum_buffer):
+            self.spectrum_buffer[:] = mono[-len(self.spectrum_buffer) :]
+            self.spectrum_write_index = 0
+            return
+        end = self.spectrum_write_index + count
+        if end <= len(self.spectrum_buffer):
+            self.spectrum_buffer[self.spectrum_write_index:end] = mono
+        else:
+            first = len(self.spectrum_buffer) - self.spectrum_write_index
+            self.spectrum_buffer[self.spectrum_write_index:] = mono[:first]
+            self.spectrum_buffer[: end % len(self.spectrum_buffer)] = mono[first:]
+        self.spectrum_write_index = end % len(self.spectrum_buffer)
+
+
+def output_spectrum_bands(block: np.ndarray, band_count: int = 24) -> np.ndarray:
+    if len(block) < 8:
+        return np.zeros(band_count, dtype=np.float32)
+    mono = block.mean(axis=1).astype(np.float32, copy=False) if block.ndim == 2 else block.astype(np.float32, copy=False)
+    window = np.hanning(len(mono)).astype(np.float32)
+    magnitudes = np.abs(np.fft.rfft(mono * window))
+    frequencies = np.fft.rfftfreq(len(mono), 1.0 / SAMPLE_RATE)
+    edges = np.geomspace(35.0, SAMPLE_RATE * 0.45, band_count + 1)
+    bands = np.zeros(band_count, dtype=np.float32)
+    for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+        mask = (frequencies >= low) & (frequencies < high)
+        if np.any(mask):
+            bands[index] = float(np.sqrt(np.mean(magnitudes[mask] * magnitudes[mask])))
+    if np.max(bands) > 0.0:
+        bands = np.log1p(bands)
+        bands /= max(float(np.max(bands)), 0.001)
+    return bands.astype(np.float32)
 
 
 def apply_global_filter(block: np.ndarray, cutoff: float, resonance: float) -> np.ndarray:

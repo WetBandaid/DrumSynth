@@ -1,6 +1,10 @@
+import copy
 import json
 import sys
+import wave
 from pathlib import Path
+
+import numpy as np
 
 from PySide6.QtCore import QPointF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPalette, QPen
@@ -38,9 +42,11 @@ from .config import (
     LFO_SHAPES,
     PATTERN_SCENES,
     SATURATION_MODES,
+    SAMPLE_RATE,
     STEPS,
 )
 from .engine import DrumEngine
+from .synth import make_hit
 
 
 CONTROL_TOOLTIPS = {
@@ -49,11 +55,14 @@ CONTROL_TOOLTIPS = {
     "bpm": "Set the project tempo in beats per minute.",
     "swing": "Shift alternating 16th notes for a looser groove.",
     "master_volume": "Set the final output level before the audio device.",
+    "output_meter": "Shows the final output spectrum after master processing.",
     "default_pattern": "Load the default drum pattern into the current scene.",
     "clear_pattern": "Clear all steps in the current scene.",
     "random_pattern": "Generate a new random pattern for the current scene.",
     "save_patch": "Save the full project as JSON, including sounds, scenes, globals, and Song Mode.",
     "load_patch": "Load a saved JSON project or legacy text pattern.",
+    "export_pattern": "Render the current pattern scene as a 4-bar WAV loop.",
+    "export_song": "Render the Song Mode chain once as a WAV file.",
     "scene_button": "Switch to this pattern scene. Scenes store step data, velocity, probability, ratchets, and track lengths.",
     "store_scene": "Store the current pattern data into the selected scene.",
     "copy_scene": "Copy the current scene pattern data.",
@@ -204,8 +213,8 @@ class EnvelopeEditor(QWidget):
         self.points = [list(point) for point in points]
         self.on_change = on_change
         self.drag_index: int | None = None
-        self.setMinimumSize(320, 180)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.setMinimumSize(220, 96)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setMouseTracking(True)
 
     def set_points(self, points):
@@ -282,6 +291,224 @@ class EnvelopeEditor(QWidget):
             rect.left() + point[0] * rect.width(),
             rect.top() + (1.0 - point[1]) * rect.height(),
         )
+
+
+class WaveformPreview(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.samples = np.zeros(0, dtype=np.float32)
+        self.setFixedHeight(64)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setToolTip("Preview of the current patch waveform.")
+
+    def set_audio(self, audio: np.ndarray):
+        if audio.ndim == 2:
+            audio = audio.mean(axis=1)
+        if len(audio) > 1200:
+            positions = np.linspace(0, len(audio) - 1, 1200).astype(int)
+            audio = audio[positions]
+        peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+        self.samples = (audio / peak).astype(np.float32) if peak > 0.0 else np.zeros(0, dtype=np.float32)
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(8, 6, -8, -6)
+        painter.fillRect(self.rect(), QColor("#15191f"))
+        painter.setPen(QPen(QColor("#2f3946"), 1))
+        center_y = rect.center().y()
+        painter.drawLine(rect.left(), center_y, rect.right(), center_y)
+        for index in range(1, 4):
+            x = rect.left() + rect.width() * index / 4
+            painter.drawLine(int(x), rect.top(), int(x), rect.bottom())
+
+        if len(self.samples) < 2:
+            painter.setPen(QPen(QColor("#6f7c8e"), 1))
+            painter.drawText(rect, Qt.AlignCenter, "No preview")
+            return
+
+        painter.setPen(QPen(QColor("#58c4dd"), 2))
+        previous = None
+        for index, sample in enumerate(self.samples):
+            x = rect.left() + rect.width() * index / max(1, len(self.samples) - 1)
+            y = center_y - sample * rect.height() * 0.42
+            point = QPointF(x, y)
+            if previous is not None:
+                painter.drawLine(previous, point)
+            previous = point
+
+
+class LevelProfilePreview(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.levels = np.zeros(0, dtype=np.float32)
+        self.peak = 0.0
+        self.rms = 0.0
+        self.setFixedHeight(64)
+        self.setMinimumWidth(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setToolTip("Shows the rendered patch level over time.")
+
+    def set_audio(self, audio: np.ndarray):
+        if audio.ndim == 2:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32, copy=False)
+        if len(audio) == 0:
+            self.levels = np.zeros(0, dtype=np.float32)
+            self.peak = 0.0
+            self.rms = 0.0
+            self.update()
+            return
+
+        self.peak = float(np.max(np.abs(audio)))
+        self.rms = float(np.sqrt(np.mean(audio * audio)))
+        bucket_count = 36
+        edges = np.linspace(0, len(audio), bucket_count + 1).astype(int)
+        levels = []
+        for start, end in zip(edges[:-1], edges[1:]):
+            segment = audio[start:max(start + 1, end)]
+            levels.append(float(np.sqrt(np.mean(segment * segment))))
+        levels = np.asarray(levels, dtype=np.float32)
+        peak = float(np.max(levels)) if len(levels) else 0.0
+        self.levels = levels / peak if peak > 0.0 else np.zeros(0, dtype=np.float32)
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(8, 6, -8, -6)
+        painter.fillRect(self.rect(), QColor("#15191f"))
+        painter.setPen(QPen(QColor("#2f3946"), 1))
+        painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
+
+        painter.setPen(QPen(QColor("#b8c4d2"), 1))
+        painter.drawText(rect.adjusted(2, 0, -2, -32), Qt.AlignLeft | Qt.AlignTop, "Level")
+        painter.drawText(
+            rect.adjusted(2, 0, -2, -32),
+            Qt.AlignRight | Qt.AlignTop,
+            f"P {self.peak:.2f}  R {self.rms:.2f}",
+        )
+
+        if len(self.levels) == 0:
+            painter.setPen(QPen(QColor("#6f7c8e"), 1))
+            painter.drawText(rect, Qt.AlignCenter, "No level")
+            return
+
+        graph_rect = rect.adjusted(0, 18, 0, 0)
+        gap = 2
+        bar_width = max(2, (graph_rect.width() - gap * (len(self.levels) - 1)) / max(1, len(self.levels)))
+        for index, level in enumerate(self.levels):
+            x = graph_rect.left() + index * (bar_width + gap)
+            height = max(2, level * graph_rect.height())
+            top = graph_rect.bottom() - height
+            color = QColor("#f2d16b") if index < 5 else QColor("#58c4dd")
+            painter.fillRect(int(x), int(top), int(bar_width), int(height), color)
+
+
+class SpectrumPreview(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.bands = np.zeros(0, dtype=np.float32)
+        self.setFixedHeight(64)
+        self.setMinimumWidth(180)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setToolTip("Shows the rendered patch frequency balance.")
+
+    def set_audio(self, audio: np.ndarray):
+        if audio.ndim == 2:
+            audio = audio.mean(axis=1)
+        audio = audio.astype(np.float32, copy=False)
+        if len(audio) < 8:
+            self.bands = np.zeros(0, dtype=np.float32)
+            self.update()
+            return
+
+        count = min(8192, len(audio))
+        segment = audio[:count] * np.hanning(count).astype(np.float32)
+        magnitudes = np.abs(np.fft.rfft(segment))
+        frequencies = np.fft.rfftfreq(count, 1.0 / SAMPLE_RATE)
+        edges = np.geomspace(35.0, 18000.0, 33)
+        bands = []
+        for low, high in zip(edges[:-1], edges[1:]):
+            mask = (frequencies >= low) & (frequencies < high)
+            bands.append(float(np.mean(magnitudes[mask])) if np.any(mask) else 0.0)
+        bands = np.asarray(bands, dtype=np.float32)
+        if len(bands):
+            bands = np.log1p(bands)
+        peak = float(np.max(bands)) if len(bands) else 0.0
+        self.bands = bands / peak if peak > 0.0 else np.zeros(0, dtype=np.float32)
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self.rect().adjusted(8, 6, -8, -6)
+        painter.fillRect(self.rect(), QColor("#15191f"))
+        painter.setPen(QPen(QColor("#b8c4d2"), 1))
+        painter.drawText(rect.adjusted(2, 0, -2, -32), Qt.AlignLeft | Qt.AlignTop, "Spectrum")
+        painter.setPen(QPen(QColor("#2f3946"), 1))
+        for index in range(1, 4):
+            y = rect.top() + rect.height() * index / 4
+            painter.drawLine(rect.left(), int(y), rect.right(), int(y))
+
+        if len(self.bands) == 0:
+            painter.setPen(QPen(QColor("#6f7c8e"), 1))
+            painter.drawText(rect, Qt.AlignCenter, "No spectrum")
+            return
+
+        graph_rect = rect.adjusted(0, 18, 0, 0)
+        gap = 2
+        bar_width = max(2, (graph_rect.width() - gap * (len(self.bands) - 1)) / max(1, len(self.bands)))
+        for index, band in enumerate(self.bands):
+            x = graph_rect.left() + index * (bar_width + gap)
+            height = max(2, band * graph_rect.height())
+            top = graph_rect.bottom() - height
+            color = QColor("#9fe3bf") if index < len(self.bands) * 0.35 else QColor("#58c4dd")
+            painter.fillRect(int(x), int(top), int(bar_width), int(height), color)
+
+
+class OutputSpectrumMeter(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.bands = np.zeros(24, dtype=np.float32)
+        self.setFixedSize(176, 36)
+        self.setToolTip(CONTROL_TOOLTIPS["output_meter"])
+
+    def set_bands(self, bands: np.ndarray):
+        self.bands = np.asarray(bands, dtype=np.float32)
+        self.update()
+
+    def paintEvent(self, event):
+        del event
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor("#15191f"))
+        rect = self.rect().adjusted(6, 5, -6, -5)
+        painter.setPen(QPen(QColor("#2f3946"), 1))
+        for index in range(1, 4):
+            y = rect.top() + rect.height() * index / 4
+            painter.drawLine(rect.left(), int(y), rect.right(), int(y))
+
+        if len(self.bands) == 0:
+            return
+        gap = 2
+        bar_width = max(2, (rect.width() - gap * (len(self.bands) - 1)) / max(1, len(self.bands)))
+        for index, band in enumerate(self.bands):
+            level = float(np.clip(band, 0.0, 1.0))
+            x = rect.left() + index * (bar_width + gap)
+            height = max(1, level * rect.height())
+            top = rect.bottom() - height
+            if index < len(self.bands) * 0.35:
+                color = QColor("#9fe3bf")
+            elif index < len(self.bands) * 0.75:
+                color = QColor("#58c4dd")
+            else:
+                color = QColor("#f2d16b")
+            painter.fillRect(int(x), int(top), int(bar_width), int(height), color)
 
 
 class MainWindow(QMainWindow):
@@ -402,6 +629,8 @@ class MainWindow(QMainWindow):
             ("Random", self._randomize, "random_pattern"),
             ("Save", self._save_patch, "save_patch"),
             ("Load", self._load_patch, "load_patch"),
+            ("Export Pattern", self._export_current_pattern, "export_pattern"),
+            ("Export Song", self._export_song, "export_song"),
         ):
             button = QPushButton(text)
             self._set_tip(button, tip_key)
@@ -409,6 +638,8 @@ class MainWindow(QMainWindow):
             layout.addWidget(button)
 
         layout.addStretch(1)
+        self.output_meter = OutputSpectrumMeter()
+        layout.addWidget(self.output_meter)
         return layout
 
     def _build_sequencer_page(self) -> QWidget:
@@ -858,10 +1089,12 @@ class MainWindow(QMainWindow):
 
     def _build_global_controls(self) -> QGroupBox:
         group = QGroupBox("Global Performance")
+        group.setProperty("compactGlobal", True)
+        group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QGridLayout(group)
-        layout.setContentsMargins(14, 18, 14, 16)
-        layout.setHorizontalSpacing(20)
-        layout.setVerticalSpacing(12)
+        layout.setContentsMargins(8, 10, 8, 8)
+        layout.setHorizontalSpacing(10)
+        layout.setVerticalSpacing(4)
 
         controls = [
             ("global_filter_cutoff", "Cutoff", 200, 18000, 1),
@@ -878,7 +1111,7 @@ class MainWindow(QMainWindow):
         fill = QToolButton()
         fill.setText("Fill")
         fill.setCheckable(True)
-        fill.setMinimumSize(72, 42)
+        fill.setFixedSize(54, 32)
         self._set_tip(fill, "fill_enabled")
         fill.toggled.connect(
             lambda checked: self.engine.set_global_param("fill_enabled", checked)
@@ -911,43 +1144,80 @@ class MainWindow(QMainWindow):
 
     def _build_track_editor(self, page: QWidget, track_index: int):
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(18)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
 
-        preset_row = QHBoxLayout()
+        controls = {
+            "instrument": None,
+            "mute": None,
+            "solo": None,
+            "dials": {},
+            "spins": {},
+            "combos": {},
+            "checks": {},
+            "envelopes": {},
+            "step": {},
+            "header_title": None,
+            "header_badges": None,
+            "waveform": None,
+            "level_profile": None,
+            "spectrum": None,
+        }
+
+        header = QGroupBox()
+        header.setProperty("soundHeader", True)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(10, 7, 10, 7)
+        header_layout.setSpacing(7)
+
+        title_column = QVBoxLayout()
+        title_column.setSpacing(2)
+        title = QLabel(self.engine.tracks[track_index].instrument)
+        title.setProperty("soundTitle", True)
+        badge = QLabel("")
+        badge.setProperty("trackBadge", True)
+        controls["header_title"] = title
+        controls["header_badges"] = badge
+        title_column.addWidget(title)
+        title_column.addWidget(badge)
+        header_layout.addLayout(title_column, 1)
+
         instrument = QComboBox()
         instrument.addItems(DRUM_PRESET_NAMES)
         self._set_tip(instrument, "track_preset")
-        preset_row.addWidget(QLabel("Preset"))
-        preset_row.addWidget(instrument)
+        controls["instrument"] = instrument
+        preset_label = QLabel("Preset")
+        preset_label.setProperty("compactLabel", True)
+        header_layout.addWidget(preset_label)
+        header_layout.addWidget(instrument)
 
-        apply_preset = QPushButton("Apply Preset")
+        apply_preset = QPushButton("Apply")
         self._set_tip(apply_preset, "apply_preset")
         apply_preset.clicked.connect(
             lambda checked=False, tr=track_index, combo=instrument: self._apply_track_preset(
                 tr, combo.currentText()
             )
         )
-        preset_row.addWidget(apply_preset)
+        header_layout.addWidget(apply_preset)
 
-        save_track_preset = QPushButton("Save Sound")
+        save_track_preset = QPushButton("Save")
         self._set_tip(save_track_preset, "save_track_preset")
         save_track_preset.clicked.connect(
             lambda checked=False, tr=track_index: self._save_track_preset(tr)
         )
-        preset_row.addWidget(save_track_preset)
+        header_layout.addWidget(save_track_preset)
 
-        load_track_preset = QPushButton("Load Sound")
+        load_track_preset = QPushButton("Load")
         self._set_tip(load_track_preset, "load_track_preset")
         load_track_preset.clicked.connect(
             lambda checked=False, tr=track_index: self._load_track_preset(tr)
         )
-        preset_row.addWidget(load_track_preset)
+        header_layout.addWidget(load_track_preset)
 
         audition = QPushButton("Audition")
         self._set_tip(audition, "audition")
         audition.clicked.connect(lambda checked=False, tr=track_index: self.engine.audition_track(tr))
-        preset_row.addWidget(audition)
+        header_layout.addWidget(audition)
 
         mute = QToolButton()
         mute.setText("M")
@@ -956,7 +1226,8 @@ class MainWindow(QMainWindow):
         mute.toggled.connect(
             lambda checked, tr=track_index: self.engine.set_track_param(tr, "muted", checked)
         )
-        preset_row.addWidget(mute)
+        controls["mute"] = mute
+        header_layout.addWidget(mute)
 
         solo = QToolButton()
         solo.setText("S")
@@ -965,27 +1236,15 @@ class MainWindow(QMainWindow):
         solo.toggled.connect(
             lambda checked, tr=track_index: self.engine.set_track_param(tr, "solo", checked)
         )
-        preset_row.addWidget(solo)
-        preset_row.addStretch(1)
-        layout.addLayout(preset_row)
-
-        controls = {
-            "instrument": instrument,
-            "mute": mute,
-            "solo": solo,
-            "dials": {},
-            "spins": {},
-            "combos": {},
-            "checks": {},
-            "envelopes": {},
-            "step": {},
-        }
+        controls["solo"] = solo
+        header_layout.addWidget(solo)
+        layout.addWidget(header)
 
         dials_group = QGroupBox("Performance")
+        dials_group.setProperty("soundPanel", True)
         dials = QGridLayout(dials_group)
-        dials.setHorizontalSpacing(20)
-        dials.setVerticalSpacing(16)
-        layout.addWidget(dials_group)
+        dials.setHorizontalSpacing(8)
+        dials.setVerticalSpacing(6)
 
         dial_specs = [
             ("volume", "Volume", 0, 120, 100),
@@ -1003,12 +1262,37 @@ class MainWindow(QMainWindow):
             ("filter_resonance", "Res", 0, 95, 100),
         ]
         for index, spec in enumerate(dial_specs):
-            self._add_track_dial(dials, controls, track_index, *spec, index // 7, index % 7)
+            self._add_track_dial(dials, controls, track_index, *spec, 0, index, size=44)
+        layout.addWidget(dials_group)
+
+        editor_columns = QHBoxLayout()
+        editor_columns.setSpacing(8)
+        layout.addLayout(editor_columns)
+        layout.addStretch(1)
+
+        left_column = QVBoxLayout()
+        left_column.setContentsMargins(0, 0, 0, 0)
+        left_column.setSpacing(8)
+        left_host = QWidget()
+        left_host.setMaximumWidth(520)
+        left_host.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        left_host.setLayout(left_column)
+        editor_columns.addWidget(left_host, alignment=Qt.AlignTop)
+
+        right_host = QWidget()
+        right_host.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        right_layout = QHBoxLayout(right_host)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(8)
+        editor_columns.addWidget(right_host, 1, alignment=Qt.AlignTop)
 
         editor_tabs = QTabWidget()
-        editor_tabs.setMinimumHeight(430)
-        editor_tabs.setToolTip("Switch between sound-design control groups for this track.")
-        layout.addWidget(editor_tabs, 1)
+        editor_tabs.setDocumentMode(True)
+        editor_tabs.setMinimumHeight(190)
+        editor_tabs.setMaximumHeight(260)
+        editor_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        editor_tabs.setToolTip("Core synthesis and tone controls for this track.")
+        left_column.addWidget(editor_tabs)
 
         synthesis = QWidget()
         synthesis_form = self._form_layout(synthesis)
@@ -1020,22 +1304,52 @@ class MainWindow(QMainWindow):
         editor_tabs.addTab(tone, "Tone / Filter")
         editor_tabs.setTabToolTip(1, "Pitched tone, noise decay, pitch envelope, and filter controls.")
 
+        detail_tabs = QTabWidget()
+        detail_tabs.setDocumentMode(True)
+        detail_tabs.setMinimumHeight(190)
+        detail_tabs.setMaximumHeight(260)
+        detail_tabs.setMinimumWidth(540)
+        detail_tabs.setMaximumWidth(780)
+        detail_tabs.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        detail_tabs.setToolTip("Effects, modulation, and per-step expression controls for this track.")
+        right_layout.addWidget(detail_tabs)
+
+        signal_group = QGroupBox("Signal")
+        signal_group.setProperty("soundPanel", True)
+        signal_group.setMinimumWidth(300)
+        signal_group.setMaximumHeight(260)
+        signal_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        signal_layout = QVBoxLayout(signal_group)
+        signal_layout.setContentsMargins(8, 10, 8, 8)
+        signal_layout.setSpacing(6)
+
+        waveform = WaveformPreview()
+        level_profile = LevelProfilePreview()
+        spectrum = SpectrumPreview()
+        controls["waveform"] = waveform
+        controls["level_profile"] = level_profile
+        controls["spectrum"] = spectrum
+        signal_layout.addWidget(waveform)
+        signal_layout.addWidget(level_profile)
+        signal_layout.addWidget(spectrum)
+        right_layout.addWidget(signal_group, 1)
+
         effects = QWidget()
         effects_form = self._form_layout(effects)
-        editor_tabs.addTab(effects, "Patch Effects")
-        editor_tabs.setTabToolTip(2, "Per-patch delay and reverb send controls.")
+        detail_tabs.addTab(effects, "Effects")
+        detail_tabs.setTabToolTip(0, "Per-patch delay and reverb send controls.")
 
         modulation = QWidget()
         modulation_layout = QVBoxLayout(modulation)
-        modulation_layout.setContentsMargins(12, 12, 12, 12)
-        modulation_layout.setSpacing(12)
+        modulation_layout.setContentsMargins(4, 4, 4, 4)
+        modulation_layout.setSpacing(6)
         modulation_tabs = QTabWidget()
         modulation_tabs.setDocumentMode(True)
-        modulation_tabs.setMinimumHeight(350)
+        modulation_tabs.setMinimumHeight(190)
         modulation_tabs.setToolTip("Switch between this patch's modulation sources.")
         modulation_layout.addWidget(modulation_tabs, 1)
-        editor_tabs.addTab(modulation, "Modulation")
-        editor_tabs.setTabToolTip(3, "LFO and envelope modulation controls for this patch.")
+        detail_tabs.addTab(modulation, "Modulation")
+        detail_tabs.setTabToolTip(1, "LFO and envelope modulation controls for this patch.")
 
         lfo1_page, lfo1_form, lfo_grid = self._build_lfo_modulation_page()
         modulation_tabs.addTab(lfo1_page, "LFO 1")
@@ -1051,8 +1365,8 @@ class MainWindow(QMainWindow):
 
         step_group = QWidget()
         step_form = self._form_layout(step_group)
-        editor_tabs.addTab(step_group, "Step Expression")
-        editor_tabs.setTabToolTip(4, "Per-step velocity, probability, and ratchet settings.")
+        detail_tabs.addTab(step_group, "Step")
+        detail_tabs.setTabToolTip(2, "Per-step velocity, probability, and ratchet settings.")
 
         self._add_combo(
             synthesis, synthesis_form, controls, track_index, "saturation_mode", "Saturation", SATURATION_MODES
@@ -1083,8 +1397,8 @@ class MainWindow(QMainWindow):
         self._add_spin(tone_form, controls, track_index, "pitch_env_decay", "Env Decay", 0.005, 1.0, 0.005, 1, " s")
 
         fx_grid = QGridLayout()
-        fx_grid.setHorizontalSpacing(14)
-        fx_grid.setVerticalSpacing(12)
+        fx_grid.setHorizontalSpacing(8)
+        fx_grid.setVerticalSpacing(6)
         effects_form.addRow(fx_grid)
         fx_specs = [
             ("delay_send", "Delay", 0, 100, 100),
@@ -1097,7 +1411,7 @@ class MainWindow(QMainWindow):
             ("reverb_tone", "Rev Tone", 0, 100, 100),
         ]
         for index, spec in enumerate(fx_specs):
-            self._add_track_dial(fx_grid, controls, track_index, *spec, index // 4, index % 4, size=64)
+            self._add_track_dial(fx_grid, controls, track_index, *spec, index // 4, index % 4, size=44)
         self._add_spin(effects_form, controls, track_index, "delay_time", "Delay Time", 0.03, 1.5, 0.01, 1, " s")
 
         self._add_check(lfo1_form, controls, track_index, "lfo_enabled", "Enabled")
@@ -1121,7 +1435,7 @@ class MainWindow(QMainWindow):
         )
         self._add_spin(lfo1_form, controls, track_index, "lfo_rate", "Rate", 0.05, 80, 0.05, 1, " Hz")
         self._add_spin(lfo1_form, controls, track_index, "lfo_phase", "Phase", 0, 100, 1, 100, "%")
-        self._add_track_dial(lfo_grid, controls, track_index, "lfo_amount", "Amount", 0, 100, 100, 0, 0, size=58)
+        self._add_track_dial(lfo_grid, controls, track_index, "lfo_amount", "Amount", 0, 100, 100, 0, 0, size=44)
 
         self._add_check(lfo2_form, controls, track_index, "lfo2_enabled", "Enabled")
         self._add_combo(
@@ -1144,7 +1458,7 @@ class MainWindow(QMainWindow):
         )
         self._add_spin(lfo2_form, controls, track_index, "lfo2_rate", "Rate", 0.05, 80, 0.05, 1, " Hz")
         self._add_spin(lfo2_form, controls, track_index, "lfo2_phase", "Phase", 0, 100, 1, 100, "%")
-        self._add_track_dial(lfo2_grid, controls, track_index, "lfo2_amount", "Amount", 0, 100, 100, 0, 0, size=58)
+        self._add_track_dial(lfo2_grid, controls, track_index, "lfo2_amount", "Amount", 0, 100, 100, 0, 0, size=44)
 
         self._add_check(envelope_form, controls, track_index, "env_mod_enabled", "Enabled")
         self._add_combo(
@@ -1156,10 +1470,10 @@ class MainWindow(QMainWindow):
             "Destination",
             LFO_DESTINATIONS,
         )
-        self._add_track_dial(env_grid, controls, track_index, "env_mod_amount", "Amount", -100, 100, 100, 0, 0, size=58)
+        self._add_track_dial(env_grid, controls, track_index, "env_mod_amount", "Amount", -100, 100, 100, 0, 0, size=38)
         envelope = EnvelopeEditor(
             self.engine.tracks[track_index].env_mod_points,
-            lambda points, tr=track_index: self.engine.set_track_param(tr, "env_mod_points", points),
+            lambda points, tr=track_index: self._set_track_param_and_preview(tr, "env_mod_points", points),
         )
         self._set_tip(envelope, "envelope_editor")
         controls["envelopes"]["env_mod_points"] = envelope
@@ -1167,7 +1481,6 @@ class MainWindow(QMainWindow):
 
         self._add_step_editor(step_form, controls, track_index)
 
-        layout.addStretch(1)
         self.track_widgets.append(controls)
 
     def _form_layout(self, group: QGroupBox) -> QFormLayout:
@@ -1175,8 +1488,9 @@ class MainWindow(QMainWindow):
         form.setLabelAlignment(Qt.AlignRight)
         form.setFormAlignment(Qt.AlignTop)
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        form.setHorizontalSpacing(12)
-        form.setVerticalSpacing(12)
+        form.setContentsMargins(8, 8, 8, 8)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(7)
         return form
 
     def _scrollable_tab_page(self, content: QWidget) -> QScrollArea:
@@ -1189,10 +1503,10 @@ class MainWindow(QMainWindow):
 
     def _build_lfo_modulation_page(self):
         content = QWidget()
-        content.setMinimumHeight(260)
+        content.setMinimumHeight(180)
         layout = QHBoxLayout(content)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(14)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
 
         source_group = QGroupBox("Source")
         source_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -1201,14 +1515,14 @@ class MainWindow(QMainWindow):
         source_form.setVerticalSpacing(10)
 
         depth_group = QGroupBox("Depth")
-        depth_group.setMinimumWidth(138)
+        depth_group.setMinimumWidth(112)
         depth_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         depth_layout = QVBoxLayout(depth_group)
-        depth_layout.setContentsMargins(12, 14, 12, 10)
-        depth_layout.setSpacing(6)
+        depth_layout.setContentsMargins(8, 10, 8, 8)
+        depth_layout.setSpacing(4)
         depth_grid = QGridLayout()
-        depth_grid.setHorizontalSpacing(10)
-        depth_grid.setVerticalSpacing(8)
+        depth_grid.setHorizontalSpacing(6)
+        depth_grid.setVerticalSpacing(4)
         depth_layout.addStretch(1)
         depth_layout.addLayout(depth_grid)
         depth_layout.addStretch(1)
@@ -1219,43 +1533,45 @@ class MainWindow(QMainWindow):
 
     def _build_envelope_modulation_page(self):
         content = QWidget()
-        content.setMinimumHeight(300)
+        content.setMinimumHeight(150)
         layout = QHBoxLayout(content)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(14)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
 
         control_column = QWidget()
-        control_column.setMinimumWidth(240)
-        control_column.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+        control_column.setMinimumWidth(190)
+        control_column.setMaximumWidth(230)
+        control_column.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         control_layout = QVBoxLayout(control_column)
         control_layout.setContentsMargins(0, 0, 0, 0)
-        control_layout.setSpacing(10)
+        control_layout.setSpacing(4)
 
         source_group = QGroupBox("Source")
         source_form = self._form_layout(source_group)
-        source_form.setHorizontalSpacing(12)
-        source_form.setVerticalSpacing(10)
+        source_form.setContentsMargins(6, 8, 6, 6)
+        source_form.setHorizontalSpacing(8)
+        source_form.setVerticalSpacing(4)
         control_layout.addWidget(source_group)
 
         depth_group = QGroupBox("Depth")
         depth_layout = QVBoxLayout(depth_group)
-        depth_layout.setContentsMargins(12, 14, 12, 10)
+        depth_layout.setContentsMargins(6, 8, 6, 6)
+        depth_layout.setSpacing(2)
         depth_grid = QGridLayout()
-        depth_grid.setHorizontalSpacing(10)
-        depth_grid.setVerticalSpacing(8)
+        depth_grid.setHorizontalSpacing(4)
+        depth_grid.setVerticalSpacing(2)
         depth_layout.addLayout(depth_grid)
         control_layout.addWidget(depth_group)
-        control_layout.addStretch(1)
 
         graph_group = QGroupBox("Envelope Shape")
-        graph_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        graph_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         graph_layout = QVBoxLayout(graph_group)
-        graph_layout.setContentsMargins(12, 14, 12, 10)
-        graph_layout.setSpacing(8)
+        graph_layout.setContentsMargins(6, 8, 6, 6)
+        graph_layout.setSpacing(3)
 
         layout.addWidget(control_column)
         layout.addWidget(graph_group, 1)
-        return self._scrollable_tab_page(content), source_form, depth_grid, graph_layout
+        return content, source_form, depth_grid, graph_layout
 
     def _add_global_dial(
         self,
@@ -1270,18 +1586,18 @@ class MainWindow(QMainWindow):
     ):
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignCenter)
-        layout.setSpacing(5)
+        layout.setSpacing(2)
         name = QLabel(label)
         name.setAlignment(Qt.AlignCenter)
         self._param_tip(name, param)
         dial = QDial()
         dial.setRange(minimum, maximum)
         dial.setNotchesVisible(True)
-        dial.setFixedSize(68, 68)
+        dial.setFixedSize(46, 46)
         self._param_tip(dial, param)
         value_label = QLabel()
         value_label.setAlignment(Qt.AlignCenter)
-        value_label.setFixedWidth(84)
+        value_label.setFixedWidth(58)
         self._param_tip(value_label, param)
         layout.addWidget(name)
         layout.addWidget(dial)
@@ -1323,7 +1639,7 @@ class MainWindow(QMainWindow):
         self._param_tip(dial, param)
         value_label = QLabel()
         value_label.setAlignment(Qt.AlignCenter)
-        value_label.setFixedWidth(max(76, size))
+        value_label.setFixedWidth(max(58, size + 8))
         self._param_tip(value_label, param)
         layout.addWidget(name)
         layout.addWidget(dial)
@@ -1336,6 +1652,7 @@ class MainWindow(QMainWindow):
             self.engine.set_track_param(
                 track_index, param, int(display) if param == "track_steps" else display
             )
+            self._update_waveform_preview(track_index)
 
         dial.valueChanged.connect(update)
         controls["dials"][param] = (dial, value_label, scale)
@@ -1355,7 +1672,7 @@ class MainWindow(QMainWindow):
         combo.addItems(values)
         self._param_tip(combo, param)
         combo.currentTextChanged.connect(
-            lambda text, tr=track_index, key=param: self.engine.set_track_param(tr, key, text)
+            lambda text, tr=track_index, key=param: self._set_track_param_and_preview(tr, key, text)
         )
         controls["combos"][param] = combo
         form.addRow(label, combo)
@@ -1402,6 +1719,7 @@ class MainWindow(QMainWindow):
                     spin.blockSignals(True)
                     spin.setValue(0.25 * scale)
                     spin.blockSignals(False)
+            self._update_waveform_preview(track_index)
 
         button.toggled.connect(update)
         controls["checks"][param] = button
@@ -1428,7 +1746,7 @@ class MainWindow(QMainWindow):
         spin.setKeyboardTracking(False)
         self._param_tip(spin, param)
         spin.valueChanged.connect(
-            lambda value, tr=track_index, key=param, factor=scale: self.engine.set_track_param(
+            lambda value, tr=track_index, key=param, factor=scale: self._set_track_param_and_preview(
                 tr,
                 key,
                 int(value / factor)
@@ -1541,20 +1859,47 @@ class MainWindow(QMainWindow):
             """
             QGroupBox {
                 border: 1px solid #3b4552;
-                border-radius: 6px;
-                margin-top: 10px;
-                padding: 10px;
+                border-radius: 5px;
+                margin-top: 7px;
+                padding: 6px;
                 font-weight: 600;
+            }
+            QGroupBox[soundHeader="true"] {
+                background: #252c36;
+                border: 1px solid #465363;
+                border-radius: 6px;
+                margin-top: 0;
+                padding: 0;
+            }
+            QGroupBox[soundPanel="true"] {
+                background: #20262e;
+                border: 1px solid #343f4c;
+                border-radius: 5px;
+                margin-top: 6px;
+                padding: 5px;
+            }
+            QGroupBox[compactGlobal="true"] {
+                margin-top: 6px;
+                padding: 5px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 4px;
+                left: 8px;
+                padding: 0 3px;
+            }
+            QLabel[soundTitle="true"] {
+                color: #f2d16b;
+                font-size: 15px;
+                font-weight: 700;
+            }
+            QLabel[compactLabel="true"] {
+                color: #b8c4d2;
+                font-weight: 700;
             }
             QPushButton, QToolButton {
                 border: 1px solid #4a5565;
                 border-radius: 5px;
-                padding: 6px 10px;
+                padding: 4px 8px;
                 background: #2d3540;
             }
             QPushButton:hover, QToolButton:hover {
@@ -1569,7 +1914,7 @@ class MainWindow(QMainWindow):
             QTabWidget::pane {
                 border: 1px solid #3b4552;
                 border-radius: 5px;
-                padding: 8px;
+                padding: 4px;
                 top: -1px;
             }
             QTabBar::tab {
@@ -1578,7 +1923,7 @@ class MainWindow(QMainWindow):
                 border-bottom: none;
                 border-top-left-radius: 5px;
                 border-top-right-radius: 5px;
-                padding: 7px 12px;
+                padding: 5px 9px;
                 margin-right: 2px;
             }
             QTabBar::tab:selected {
@@ -1586,7 +1931,7 @@ class MainWindow(QMainWindow):
                 color: #f2d16b;
             }
             QDoubleSpinBox, QSpinBox, QComboBox {
-                min-height: 26px;
+                min-height: 22px;
                 padding: 2px 6px;
             }
             StepButton {
@@ -1775,9 +2120,40 @@ class MainWindow(QMainWindow):
             self.track_labels[track_index].setText(
                 f"{track.instrument} {' '.join(badges)}" if badges else track.instrument
             )
+            widgets["header_title"].setText(track.instrument)
+            widgets["header_badges"].setText(" ".join(badges) if badges else "Clean")
             self.track_tabs.setTabText(track_index, f"{track_index + 1}: {track.instrument}")
             self._sync_step_editor(track_index, widgets["step"]["selected"].value() - 1)
+            self._update_waveform_preview(track_index)
         self._sync_step_inspector()
+
+    def _update_waveform_preview(self, track_index: int):
+        if track_index >= len(self.track_widgets):
+            return
+        preview = self.track_widgets[track_index].get("waveform")
+        level_profile = self.track_widgets[track_index].get("level_profile")
+        spectrum = self.track_widgets[track_index].get("spectrum")
+        if preview is None and level_profile is None and spectrum is None:
+            return
+        with self.engine.lock:
+            track = copy.deepcopy(self.engine.tracks[track_index])
+        with self.engine.render_random_lock:
+            random_state = np.random.get_state()
+            np.random.seed(10_000 + track_index)
+            try:
+                audio = make_hit(track)
+            finally:
+                np.random.set_state(random_state)
+        if preview is not None:
+            preview.set_audio(audio)
+        if level_profile is not None:
+            level_profile.set_audio(audio)
+        if spectrum is not None:
+            spectrum.set_audio(audio)
+
+    def _set_track_param_and_preview(self, track_index: int, param: str, value):
+        self.engine.set_track_param(track_index, param, value)
+        self._update_waveform_preview(track_index)
 
     def _sync_step_editor(self, track_index: int, step: int):
         widgets = self.track_widgets[track_index]["step"]
@@ -2309,6 +2685,63 @@ class MainWindow(QMainWindow):
         except OSError as exc:
             QMessageBox.warning(self, "Save failed", str(exc))
 
+    def _export_current_pattern(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export current pattern",
+            "dsynth_pattern.wav",
+            "WAV files (*.wav);;All files (*.*)",
+        )
+        if not path:
+            return
+        self._render_and_write_wav(path, lambda: self.engine.render_current_pattern(bars=4), "Pattern export")
+
+    def _export_song(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Song Mode arrangement",
+            "dsynth_song.wav",
+            "WAV files (*.wav);;All files (*.*)",
+        )
+        if not path:
+            return
+        self._render_and_write_wav(path, self.engine.render_song_arrangement, "Song export")
+
+    def _render_and_write_wav(self, path: str, render_func, title: str):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            audio = render_func()
+            self._write_wav(path, audio)
+        except Exception as exc:
+            QMessageBox.warning(self, f"{title} failed", str(exc))
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        duration = len(audio) / SAMPLE_RATE
+        QMessageBox.information(
+            self,
+            f"{title} complete",
+            f"Saved {Path(path).name}\n\nLength: {duration:.1f} seconds",
+        )
+
+    def _write_wav(self, path: str, audio: np.ndarray):
+        audio = np.asarray(audio, dtype=np.float32)
+        if audio.ndim == 1:
+            audio = np.column_stack((audio, audio))
+        if audio.shape[1] != 2:
+            raise ValueError("Export audio must be stereo.")
+        peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
+        if peak > 1.0:
+            audio = audio / peak * 0.98
+        pcm = np.clip(audio, -1.0, 1.0)
+        pcm = (pcm * 32767.0).astype("<i2", copy=False)
+        with wave.open(path, "wb") as handle:
+            handle.setnchannels(2)
+            handle.setsampwidth(2)
+            handle.setframerate(SAMPLE_RATE)
+            handle.writeframes(pcm.tobytes())
+
     def _load_patch(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -2352,6 +2785,9 @@ class MainWindow(QMainWindow):
         self._sync_from_engine()
 
     def _refresh_playhead(self, force: bool = False):
+        if hasattr(self, "output_meter"):
+            self.output_meter.set_bands(self.engine.spectrum_levels())
+
         with self.engine.lock:
             visible_step = (self.engine.current_step - 1) % STEPS if self.engine.playing else 0
             current_scene = self.engine.current_scene

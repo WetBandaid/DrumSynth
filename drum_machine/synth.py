@@ -423,12 +423,22 @@ def low_tom_body(
 
 def perc_body(length: int, start_hz: float, end_hz: float, pitch: float, tone_seconds: float) -> np.ndarray:
     t = np.arange(length, dtype=np.float32) / SAMPLE_RATE
-    bend = np.exp(-t / 0.035).astype(np.float32)
-    frequency = (end_hz + (start_hz - end_hz) * bend) * pitch
-    phase = 2.0 * np.pi * np.cumsum(frequency) / SAMPLE_RATE
-    tone = np.sin(phase) * timed_envelope(length, tone_seconds * 0.34, 0.001)
-    tone += 0.28 * np.sin(phase * 1.82 + 0.4) * timed_envelope(length, tone_seconds * 0.18, 0.0008)
-    return normalize_peak(tone.astype(np.float32), 0.88)
+    env = timed_envelope(length, max(0.11, tone_seconds * 0.70), 0.0008)
+    hit_env = timed_envelope(length, max(0.018, tone_seconds * 0.12), 0.00025)
+    base = float(np.clip(start_hz * pitch, 120.0, SAMPLE_RATE * 0.38))
+    upper = float(np.clip(end_hz * pitch, base * 1.15, SAMPLE_RATE * 0.42))
+    body = np.zeros(length, dtype=np.float32)
+    for freq, gain, phase in (
+        (base, 0.35, 0.1),
+        (upper, 0.46, 0.7),
+        (upper * 1.47, 0.22, 1.3),
+        (base * 2.64, 0.16, 2.1),
+    ):
+        freq = min(freq, SAMPLE_RATE * 0.43)
+        body += np.sin(2.0 * np.pi * freq * t + phase).astype(np.float32) * gain
+    strike = band_limited_noise(length, 2200.0, 12000.0) * hit_env * 0.20
+    body = np.tanh((body * env + strike) * 1.05).astype(np.float32)
+    return normalize_peak(one_pole_lowpass(body, 7600.0, 0.04), 0.86)
 
 
 def step_note_resonance(
@@ -555,8 +565,8 @@ def make_hit(
                 pitch,
             )
         elif track.instrument == "Perc":
-            n = band_limited_noise(length, 500.0, 4200.0)
-            n *= timed_envelope(length, max(0.050, noise_seconds * 0.55), 0.0009)
+            n = band_limited_noise(length, 2600.0, 13500.0)
+            n *= timed_envelope(length, max(0.080, noise_seconds * 0.75), 0.0006)
         else:
             n = highpass_like(noise(duration))
             n *= envelope(length, noise_seconds, 8.5)

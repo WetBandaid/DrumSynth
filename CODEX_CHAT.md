@@ -105,6 +105,19 @@ Implemented so far:
 - Sequencer note labels now appear on active steps regardless of whether Note Mode has been enabled yet, so the default/original step note is visible before the first edit.
 - Changing a Step Note back to C2 now clears that step's pitch override, so the kick returns to the original base patch sound instead of staying on the tuned-note render path.
 - Kick Step Note overrides now transpose the normal kick patch by semitones instead of switching to a separate tuned-bass synthesis path, so note edits change pitch without changing the kick character.
+- Default drum presets were retuned toward TR-909-style equivalents: punchy compact kick, snappy snare/clap, bright sample-like hats/cymbal, tuned tom, rimshot, and ride/percussion-like Perc voice.
+- Track Sound Design received a first-pass layout polish with a fixed track header strip, live waveform preview, two-column editor layout, flatter sound panels, and separate right-side tabs for effects, modulation, and step expression.
+- Track Sound Design was compacted further with smaller dials, tighter panel/tab padding, a shorter waveform preview, a full-width performance strip, and lower minimum tab heights to reduce dead space.
+- The Synthesis / Tone-Filter column was capped to a compact maximum width so it no longer expands across unused horizontal space; the right-side detail panel now receives the extra room.
+- The Synthesis / Tone-Filter and Effects/Modulation/Step columns now share zero top margins and top alignment so their tab bars line up vertically.
+- The Sequencer tab's Global Performance section was compacted with smaller dials, tighter padding, reduced spacing, and a shorter Fill button so it uses less vertical room.
+- Track Sound Design gained a compact Signal analysis panel with waveform, level-over-time, and spectrum graphs. The panel now sits beside the Effects/Modulation/Step block, and editor tabs keep a fixed practical height instead of stretching into large empty framed panels.
+- The Signal analysis panel now expands with the Track Sound Design window width, filling the remaining space to the right of the Effects/Modulation/Step block.
+- Added WAV export for both the current pattern and Song Mode arrangement. Export uses an offline engine render path with step timing, ratchets, note overrides, fill mode, patch effects, and global bus processing.
+- Resized the Modulation Envelope sub-tab so its source controls, amount dial, and envelope graph fit inside the tab without needing scrolling.
+- Fixed pattern clearing after morphing: Clear now resets hidden step expression data, clears stale voices/caches, and Fill mode no longer generates ghost hits from a fully blank pattern.
+- Reworked the top-right output meter into a compact live spectrum display fed by the final processed audio callback.
+- Improved the output spectrum analyzer's low-end response by feeding it from a rolling 4096-sample output buffer instead of the tiny audio callback block, giving sub/kick frequencies enough FFT resolution to move the low bands.
 
 ## Verification Commands Used
 

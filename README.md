@@ -19,11 +19,13 @@ DSynth is a PySide6 desktop drum synthesizer and 8-track step sequencer. It uses
 - Note Mode for tuned per-step playback on any track
 - Pattern tools for copy, paste, clear, and rotate
 - Global performance controls for filter, drive, compression, density, humanize, FX amount, and fill
+- Compact output spectrum display in the top toolbar
 - Per-patch delay and reverb
 - Per-track modulation with two LFOs and a draggable envelope editor
 - Per-track sound preset save/load for reusing individual drum patches
 - Tooltips on transport, sequencer, song, global, patch, modulation, and step-expression controls
 - Patch save/load as JSON
+- WAV export for the current pattern loop or full Song Mode arrangement
 
 ## Requirements
 
@@ -63,6 +65,7 @@ presets/                Default folder for saved track sound presets
 4. Use the Song Mode tab to chain scenes into a longer arrangement.
 5. Use Track Sound Design to edit each drum patch.
 6. Save patches with `Save`; load them with `Load`.
+7. Use `Export Pattern` or `Export Song` to render a WAV file.
 
 The `Fill` control adds temporary end-of-bar hat and percussion variations during playback. It does not edit the saved pattern.
 
@@ -118,6 +121,12 @@ On startup, DSynth randomly chooses one of these generator styles and writes a f
 
 Scene changes happen at bar boundaries. Song chains are saved and loaded with the JSON patch file.
 Song Mode has its own main tab, and the top-aligned slot list scrolls when the arrangement grows.
+
+## WAV Export
+
+Use `Export Pattern` to render the current scene as a four-bar WAV loop. Use `Export Song` to render the Song Mode chain once from start to finish.
+
+Exports include per-track patch effects, note-mode steps, ratchets, fill mode, global filter, drive, compression, and master volume.
 
 ## LFO Modulation
 
