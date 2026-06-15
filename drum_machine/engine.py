@@ -954,11 +954,22 @@ class DrumEngine:
 
     def prepare_render_cache(self):
         with self.lock:
-            for track_index, track in enumerate(self.tracks):
-                for step, enabled in enumerate(track.pattern):
-                    if enabled:
-                        phase = self._lfo_phases_for_track(track, self.transport_sample_position)
-                        self._render_step_hit_locked(track_index, step, phase)
+            jobs = self._cache_jobs_locked()
+
+        rendered = []
+        for track_index, key, track, phase_key, global_fx_amount in jobs:
+            rendered.append(
+                (
+                    track_index,
+                    key,
+                    self._render_track_copy(track, phase_key, global_fx_amount),
+                )
+            )
+
+        with self.lock:
+            for track_index, key, audio in rendered:
+                self.render_cache[key] = audio
+                self.fallback_hits[track_index] = audio
 
     def prepare_render_cache_async(self):
         start_thread = False

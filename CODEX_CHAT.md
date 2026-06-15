@@ -129,6 +129,8 @@ Implemented so far:
 - Restored live Song Mode sequencer-grid updates by adding a lightweight scene sync that refreshes only scene controls, step buttons, track labels, and the selected-step inspector.
 - Debounced Track Sound Design updates so rapid control changes no longer render signal previews or rebuild live playback caches on every dial tick, reducing UI lag and audio glitches while editing sounds.
 - Reworked the Envelope modulation page so Source and Depth sit side by side above a full-width Envelope Shape section, preventing group border overlap as the Track Sound Design area resizes.
+- Moved the Track Sound Design header stretch to the right side so preset/audition/mute controls sit directly beside the track label.
+- Reduced Play-button startup glitches by changing synchronous cache preparation to render hits outside the engine lock before storing them, so the audio callback is not blocked while caches warm.
 
 ## Verification Commands Used
 
