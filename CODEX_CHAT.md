@@ -131,6 +131,10 @@ Implemented so far:
 - Reworked the Envelope modulation page so Source and Depth sit side by side above a full-width Envelope Shape section, preventing group border overlap as the Track Sound Design area resizes.
 - Moved the Track Sound Design header stretch to the right side so preset/audition/mute controls sit directly beside the track label.
 - Reduced Play-button startup glitches by changing synchronous cache preparation to render hits outside the engine lock before storing them, so the audio callback is not blocked while caches warm.
+- Further reduced live-edit audio glitches by making playback use the previous cached hit as a fallback whenever a newly edited hit is not rendered yet, avoiding realtime synthesis inside the audio callback for LFO/note-sensitive tracks.
+- Added factory kit packs in Track Sound Design. Kit packs apply coordinated sound-design settings across all tracks while preserving patterns, song scenes, and scene names.
+- Reduced live preset-apply glitches by preserving old cached hits as fallbacks for kit packs, using targeted sound-control UI refreshes instead of full syncs, queuing signal preview refreshes, and skipping auto-audition while playback is running.
+- Refactored UI support code: reusable custom Qt widgets moved to `drum_machine/widgets.py`, tooltip dictionaries moved to `drum_machine/tooltips.py`, and factory kit-pack definitions moved to `drum_machine/kit_packs.py`.
 
 ## Verification Commands Used
 

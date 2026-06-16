@@ -6,8 +6,9 @@ import threading
 import numpy as np
 import sounddevice as sd
 
-from .config import CHANNELS, GENERATOR_STYLES, PATTERN_SCENES, SAMPLE_RATE, STEPS
+from .config import CHANNELS, DRUM_PRESETS, GENERATOR_STYLES, PATTERN_SCENES, SAMPLE_RATE, STEPS
 from .effects import BusCompressor, one_pole_lowpass
+from .kit_packs import KIT_PACKS
 from .model import create_default_tracks
 from .synth import make_hit
 
@@ -244,6 +245,23 @@ class DrumEngine:
             should_render = self.playing
         if should_render:
             self.prepare_render_cache_async()
+
+    def apply_kit_pack(self, pack_name: str):
+        should_render = False
+        with self.lock:
+            overrides = KIT_PACKS.get(pack_name)
+            if overrides is None:
+                return False
+            for track in self.tracks:
+                instrument = track.name if track.name in DRUM_PRESETS else track.instrument
+                track.apply_preset(instrument)
+                track.update_sound_preset(overrides.get(instrument, {}))
+            for track_index in range(len(self.tracks)):
+                self._clear_track_cache(track_index)
+            should_render = self.playing
+        if should_render:
+            self.prepare_render_cache_async()
+        return True
 
     def track_sound_preset_state(self, track: int) -> dict:
         with self.lock:
@@ -1630,12 +1648,7 @@ class DrumEngine:
         render_track = self._render_track_for_step(source_track, step)
         key, phase_key = self._cache_key_for_track(track_index, render_track, lfo_phase)
         if key not in self.render_cache:
-            if (
-                self.playing
-                and track_index in self.fallback_hits
-                and not self._has_note_overrides(source_track)
-                and not self._has_lfo_phase_variation(render_track)
-            ):
+            if self.playing and track_index in self.fallback_hits:
                 return self.fallback_hits[track_index]
             self.render_cache[key] = self._render_track_copy(
                 render_track,
@@ -1690,11 +1703,7 @@ class DrumEngine:
         track = self.tracks[track_index]
         key, phase_key = self._cache_key_for_track(track_index, track, lfo_phase)
         if key not in self.render_cache:
-            if (
-                self.playing
-                and track_index in self.fallback_hits
-                and not self._has_lfo_phase_variation(track)
-            ):
+            if self.playing and track_index in self.fallback_hits:
                 return self.fallback_hits[track_index]
             self.render_cache[key] = self._render_track_copy(
                 track,

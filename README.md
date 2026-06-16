@@ -16,6 +16,7 @@ DSynth is a PySide6 desktop drum synthesizer and 8-track step sequencer. It uses
 - Static session generator for creating multiple pattern scenes and a Song Mode chain
 - Random generated startup session chosen from the generator styles
 - Per-track sound design tabs with nested editor tabs
+- Factory kit packs for quickly retuning all track sounds together
 - Per-step velocity, probability, and ratchet controls
 - Note Mode for tuned per-step playback on any track
 - Pattern tools for copy, paste, clear, and rotate
@@ -50,11 +51,14 @@ From the project folder:
 ```text
 DSynth.py                App launcher
 drum_machine/config.py   Constants, presets, menu values
+drum_machine/kit_packs.py Factory kit pack definitions
 drum_machine/model.py    Track patch and sequencer data model
 drum_machine/synth.py    Drum voice construction and per-hit rendering
 drum_machine/effects.py  Filters, saturation, bitcrush, patch FX, modulation helpers, bus compressor
 drum_machine/engine.py   Audio engine, sequencer, pattern scenes
 drum_machine/main_window.py PySide6 UI
+drum_machine/widgets.py  Reusable custom Qt widgets and analyzer displays
+drum_machine/tooltips.py Control and parameter tooltip text
 presets/                Default folder for saved track sound presets
 ```
 
