@@ -649,7 +649,7 @@ class DrumEngine:
             self._maybe_add_steps(rng, perc_steps, [2, 7, 10, 15], variation * 0.25)
         self._write_steps(tracks[5], tom_steps, rng, 0.52, 0.85, variation)
         self._write_steps(tracks[6], rim_steps, rng, 0.38, 0.66, variation)
-        self._write_steps(tracks[7], perc_steps, rng, 0.36, 0.70, variation)
+        self._write_steps(tracks[7], perc_steps, rng, 0.24, 0.50, variation)
 
         if fills > 0.0 and final_turn:
             fill_steps = [12, 13, 14, 15]
@@ -657,10 +657,13 @@ class DrumEngine:
             for local_index, step in enumerate(fill_steps):
                 if rng.random() <= fills * (0.45 + local_index * 0.16):
                     track_index = int(rng.choice(fill_tracks))
+                    velocity = float(rng.uniform(0.42, 0.84))
+                    if track_index == 7:
+                        velocity = min(0.52, velocity * 0.62)
                     self._set_generated_step(
                         tracks[track_index],
                         step,
-                        float(rng.uniform(0.42, 0.84)),
+                        velocity,
                         2 if step in {14, 15} and fills > 0.55 else 1,
                     )
             if fills > 0.70:
@@ -1303,6 +1306,8 @@ class DrumEngine:
             data = track_defs.get(track.name, {})
             pattern = self._pattern_string_to_bools(data.get("pattern", ""), False)
             velocities = self._pattern_pack_values(data.get("velocities", {}), 1.0, float, 0.0, 1.4)
+            if track.name == "Perc":
+                velocities = [float(np.clip(value * 0.72, 0.0, 1.0)) for value in velocities]
             probabilities = self._pattern_pack_values(data.get("probabilities", {}), 1.0, float, 0.0, 1.0)
             ratchets = self._pattern_pack_values(data.get("ratchets", {}), 1, int, 1, 4)
             bass_notes = self._pattern_pack_values(data.get("bass_notes", {}), 36, int, 12, 84)

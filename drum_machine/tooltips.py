@@ -19,6 +19,7 @@ CONTROL_TOOLTIPS = {
     "clear_scene": "Clear all tracks in the current scene.",
     "clear_all_patterns": "Clear every pattern scene while keeping track sounds and scene names.",
     "scene_name": "Name the current scene for easier arranging and morphing.",
+    "sequencer_mute": "Mute or unmute this track directly from the sequencer row.",
     "pattern_pack": "Choose a factory groove to load into the current scene.",
     "apply_pattern_pack": "Load the selected groove into the current scene and apply its suggested tempo.",
     "apply_pattern_pack_with_kit": "Load the selected groove, suggested tempo, and matching factory kit pack.",

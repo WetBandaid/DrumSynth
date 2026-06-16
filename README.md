@@ -10,6 +10,7 @@ DSynth is a PySide6 desktop drum synthesizer and 8-track step sequencer. It uses
 - Pattern Morph tool for blending one scene toward another
 - Named scenes for clearer arranging, song slots, and morph routing
 - Sequencer Step Inspector for editing the selected step without leaving the Sequencer tab
+- Per-track mute buttons directly on the Sequencer rows
 - Step note labels on active steps when Note Mode is enabled
 - Song mode for chaining pattern scenes into longer arrangements
 - Analyzer tab with separate left/right output spectrum displays and adjustable trace averaging

@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
         self.engine = DrumEngine()
         self.step_buttons: list[list[StepButton]] = []
         self.track_labels: list[QLabel] = []
+        self.track_mute_buttons: list[QToolButton] = []
         self.track_widgets = []
         self.global_widgets = {"dials": {}, "buttons": {}}
         self.scene_buttons: list[QToolButton] = []
@@ -294,28 +295,48 @@ class MainWindow(QMainWindow):
         grid.setContentsMargins(12, 18, 12, 16)
         grid.setHorizontalSpacing(5)
         grid.setVerticalSpacing(9)
-        grid.setColumnMinimumWidth(0, 96)
+        grid.setColumnMinimumWidth(0, 88)
+        grid.setColumnMinimumWidth(1, 34)
         grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 0)
 
         track_header = QLabel("Track")
         track_header.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         grid.addWidget(track_header, 0, 0)
+
+        mute_header = QLabel("M")
+        mute_header.setAlignment(Qt.AlignCenter)
+        mute_header.setToolTip("Mute track")
+        grid.addWidget(mute_header, 0, 1)
+
         for step in range(STEPS):
             label = QLabel(str(step + 1))
             label.setAlignment(Qt.AlignCenter)
             label.setMinimumWidth(28)
             if step % 4 == 0:
                 label.setProperty("barStart", True)
-            grid.addWidget(label, 0, step + 1)
-            grid.setColumnStretch(step + 1, 1)
+            grid.addWidget(label, 0, step + 2)
+            grid.setColumnStretch(step + 2, 1)
 
         for track_index, track_name in enumerate(INSTRUMENTS):
             name = QLabel(track_name)
-            name.setMinimumWidth(92)
+            name.setMinimumWidth(84)
             name.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             name.setProperty("trackFamily", self._track_family(track_index))
             grid.addWidget(name, track_index + 1, 0)
             self.track_labels.append(name)
+
+            mute = QToolButton()
+            mute.setText("M")
+            mute.setCheckable(True)
+            mute.setFixedSize(30, 28)
+            mute.setProperty("sequencerMute", True)
+            self._set_tip(mute, "sequencer_mute")
+            mute.toggled.connect(
+                lambda checked, tr=track_index: self._set_track_mute(tr, checked)
+            )
+            grid.addWidget(mute, track_index + 1, 1)
+            self.track_mute_buttons.append(mute)
 
             row = []
             for step in range(STEPS):
@@ -331,7 +352,7 @@ class MainWindow(QMainWindow):
                     lambda checked=False, tr=track_index, st=step: self._select_step(tr, st)
                 )
                 button.rightClicked.connect(self._select_step)
-                grid.addWidget(button, track_index + 1, step + 1)
+                grid.addWidget(button, track_index + 1, step + 2)
                 row.append(button)
             self.step_buttons.append(row)
 
@@ -889,7 +910,7 @@ class MainWindow(QMainWindow):
         mute.setCheckable(True)
         self._set_tip(mute, "mute")
         mute.toggled.connect(
-            lambda checked, tr=track_index: self.engine.set_track_param(tr, "muted", checked)
+            lambda checked, tr=track_index: self._set_track_mute(tr, checked)
         )
         controls["mute"] = mute
         header_layout.addWidget(mute)
@@ -1576,6 +1597,15 @@ class MainWindow(QMainWindow):
                 color: #071217;
                 font-weight: 700;
             }
+            QToolButton[sequencerMute="true"] {
+                padding: 2px 0;
+                font-weight: 700;
+            }
+            QToolButton[sequencerMute="true"]:checked {
+                background: #d86a6a;
+                border-color: #f2a0a0;
+                color: #1b0b0b;
+            }
             QTabWidget::pane {
                 border: 1px solid #3b4552;
                 border-radius: 5px;
@@ -1796,10 +1826,7 @@ class MainWindow(QMainWindow):
                 button.style().polish(button)
                 button.blockSignals(False)
 
-            badges = self._track_badges(track)
-            self.track_labels[track_index].setText(
-                f"{track.instrument} {' '.join(badges)}" if badges else track.instrument
-            )
+            self._sync_track_mute_state(track_index, track)
 
     def _sync_live_scene_from_engine(self):
         with self.engine.lock:
@@ -1938,6 +1965,35 @@ class MainWindow(QMainWindow):
         self._schedule_waveform_preview(track_index)
         self._schedule_render_cache_refresh()
 
+    def _set_track_mute(self, track_index: int, muted: bool):
+        self.engine.set_track_param(track_index, "muted", muted)
+        self._sync_track_mute_state(track_index)
+        self._sync_step_inspector()
+
+    def _sync_track_mute_state(self, track_index: int, track=None):
+        if track is None:
+            with self.engine.lock:
+                track = copy.copy(self.engine.tracks[track_index])
+
+        if track_index < len(self.track_mute_buttons):
+            button = self.track_mute_buttons[track_index]
+            button.blockSignals(True)
+            button.setChecked(bool(track.muted))
+            button.blockSignals(False)
+
+        if track_index < len(self.track_widgets):
+            mute = self.track_widgets[track_index].get("mute")
+            if mute is not None:
+                mute.blockSignals(True)
+                mute.setChecked(bool(track.muted))
+                mute.blockSignals(False)
+
+        if track_index < len(self.track_labels):
+            badges = self._track_badges(track)
+            self.track_labels[track_index].setText(
+                f"{track.instrument} {' '.join(badges)}" if badges else track.instrument
+            )
+
     def _sync_step_editor(self, track_index: int, step: int):
         widgets = self.track_widgets[track_index]["step"]
         with self.engine.lock:
@@ -2003,6 +2059,9 @@ class MainWindow(QMainWindow):
             self._sync_step_inspector()
 
     def _set_inspector_track_param(self, param: str, value):
+        if param == "muted":
+            self._set_track_mute(self.selected_pattern_track, value)
+            return
         self.engine.set_track_param(self.selected_pattern_track, param, value)
         self._sync_from_engine()
 
