@@ -862,7 +862,9 @@ class MainWindow(QMainWindow):
         apply_kit = QPushButton("Apply Kit")
         self._set_tip(apply_kit, "apply_kit_pack")
         apply_kit.clicked.connect(
-            lambda checked=False, combo=kit_pack: self._apply_kit_pack(combo.currentText())
+            lambda checked=False, tr=track_index, combo=kit_pack: self._apply_kit_pack(
+                tr, combo.currentText()
+            )
         )
         header_layout.addWidget(apply_kit)
 
@@ -2462,13 +2464,15 @@ class MainWindow(QMainWindow):
         if not playing:
             self.engine.audition_track(track_index)
 
-    def _apply_kit_pack(self, pack_name: str):
-        if self.engine.apply_kit_pack(pack_name):
-            self._sync_track_sound_controls(range(len(self.engine.tracks)))
+    def _apply_kit_pack(self, track_index: int, pack_name: str):
+        if self.engine.apply_kit_pack_to_track(track_index, pack_name):
+            self._sync_track_sound_controls([track_index])
+            if track_index == self.selected_pattern_track:
+                self._sync_step_inspector()
             with self.engine.lock:
                 playing = self.engine.playing
             if not playing:
-                self.engine.audition_track(self.selected_pattern_track)
+                self.engine.audition_track(track_index)
 
     def _preset_directory(self) -> Path:
         directory = Path(__file__).resolve().parent.parent / "presets"

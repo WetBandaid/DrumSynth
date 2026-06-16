@@ -264,6 +264,22 @@ class DrumEngine:
             self.prepare_render_cache_async()
         return True
 
+    def apply_kit_pack_to_track(self, track_index: int, pack_name: str):
+        should_render = False
+        with self.lock:
+            overrides = KIT_PACKS.get(pack_name)
+            if overrides is None or not 0 <= track_index < len(self.tracks):
+                return False
+            track = self.tracks[track_index]
+            instrument = track.name if track.name in DRUM_PRESETS else track.instrument
+            track.apply_preset(instrument)
+            track.update_sound_preset(overrides.get(instrument, {}))
+            self._clear_track_cache(track_index)
+            should_render = self.playing
+        if should_render:
+            self.prepare_render_cache_async()
+        return True
+
     def track_sound_preset_state(self, track: int) -> dict:
         with self.lock:
             return copy.deepcopy(self.tracks[track].sound_preset_dict())

@@ -140,6 +140,7 @@ Implemented so far:
 - Reduced the app minimum window size by splitting the transport/actions and Pattern Scenes controls into compact rows, then making the Sequencer tab scrollable.
 - Added compact per-track mute buttons to each Sequencer row, synchronized with the Step Inspector and Track Sound Design mute controls.
 - Softened the Perc voice by lowering its default volume/tone/noise/click levels, reducing its rendered body brightness, and scaling generated/pattern-pack Perc velocities down.
+- Changed Track Sound Design kit application to affect only the selected track, matching the per-track editor placement. Groove + Kit still applies a matched full kit for generated grooves.
 
 ## Verification Commands Used
 
