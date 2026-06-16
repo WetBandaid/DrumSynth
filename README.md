@@ -17,6 +17,7 @@ DSynth is a PySide6 desktop drum synthesizer and 8-track step sequencer. It uses
 - Random generated startup session chosen from the generator styles
 - Per-track sound design tabs with nested editor tabs
 - Factory kit packs for quickly retuning all track sounds together
+- Factory pattern packs for loading ready-made grooves into the current scene
 - Per-step velocity, probability, and ratchet controls
 - Note Mode for tuned per-step playback on any track
 - Pattern tools for copy, paste, clear, and rotate
@@ -52,6 +53,7 @@ From the project folder:
 DSynth.py                App launcher
 drum_machine/config.py   Constants, presets, menu values
 drum_machine/kit_packs.py Factory kit pack definitions
+drum_machine/pattern_packs.py Factory groove and pattern pack definitions
 drum_machine/model.py    Track patch and sequencer data model
 drum_machine/synth.py    Drum voice construction and per-hit rendering
 drum_machine/effects.py  Filters, saturation, bitcrush, patch FX, modulation helpers, bus compressor
@@ -80,6 +82,10 @@ Each track editor has `Save Sound` and `Load Sound` buttons. These save or load 
 
 Track sound presets do not change pattern steps, step expression, mute/solo state, or song scenes. The default save/load folder is `presets/`.
 The preset selector includes an extra `Crash` cymbal sound while the sequencer remains an 8-track layout.
+
+Factory kit packs retune all tracks together while preserving pattern data. Included packs are `909 Core`, `Raw 909`, `Warehouse Techno`, `Acid House`, `Deep House`, `Electro Snap`, `Breakbeat Box`, `Industrial`, `Dub Space`, `Lo-Fi Tape`, `Minimal Tight`, `Dark Synth`, `Pop Machine`, `Ambient Percussion`, and `Glitch Kit`.
+
+Factory pattern packs load a ready-made groove into the current scene and can optionally load a matching kit pack. Included pattern packs are `909 House Basic`, `Warehouse Drive`, `Electro Break`, `Dub Skank`, `Minimal Pulse`, `Dark Synth March`, `Half-Time Heavy`, and `Glitch Fill`.
 
 ## Pattern Scenes
 

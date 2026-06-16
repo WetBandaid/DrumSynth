@@ -10,6 +10,7 @@ from .config import CHANNELS, DRUM_PRESETS, GENERATOR_STYLES, PATTERN_SCENES, SA
 from .effects import BusCompressor, one_pole_lowpass
 from .kit_packs import KIT_PACKS
 from .model import create_default_tracks
+from .pattern_packs import PATTERN_PACKS
 from .synth import make_hit
 
 
@@ -402,6 +403,39 @@ class DrumEngine:
             fills,
             variation,
         )
+
+    def apply_pattern_pack(self, pack_name: str, apply_tempo: bool = True, apply_kit: bool = False):
+        should_render = False
+        with self.lock:
+            pack = PATTERN_PACKS.get(pack_name)
+            if pack is None:
+                return False
+            tracks = self._pattern_pack_scene_tracks(pack)
+            scene = {"tracks": tracks}
+            self._load_scene_locked(scene)
+            self.pattern_scenes[self.current_scene] = copy.deepcopy(scene)
+            scene_name = str(pack.get("scene_name", pack_name)).strip()
+            self.scene_names[self.current_scene] = scene_name[:24] or f"Scene {self.current_scene + 1}"
+            if apply_tempo and "bpm" in pack:
+                self.bpm = float(np.clip(pack["bpm"], 40.0, 240.0))
+            if apply_kit:
+                overrides = KIT_PACKS.get(str(pack.get("kit_pack", "")))
+                if overrides is not None:
+                    for track in self.tracks:
+                        instrument = track.name if track.name in DRUM_PRESETS else track.instrument
+                        track.apply_preset(instrument)
+                        track.update_sound_preset(overrides.get(instrument, {}))
+                    for track_index in range(len(self.tracks)):
+                        self._clear_track_cache(track_index)
+            self.voices.clear()
+            self.scheduled.clear()
+            self.current_step = 0
+            self.samples_until_step = 0
+            self.render_cache.clear()
+            should_render = self.playing
+        if should_render:
+            self.prepare_render_cache_async()
+        return True
 
     def _generate_scene_pattern(
         self,
@@ -1262,6 +1296,65 @@ class DrumEngine:
     def _store_current_scene_locked(self):
         self.pattern_scenes[self.current_scene] = self._snapshot_pattern_locked()
 
+    def _pattern_pack_scene_tracks(self, pack: dict) -> list[dict]:
+        track_defs = pack.get("tracks", {})
+        scene_tracks = []
+        for track in self.tracks:
+            data = track_defs.get(track.name, {})
+            pattern = self._pattern_string_to_bools(data.get("pattern", ""), False)
+            velocities = self._pattern_pack_values(data.get("velocities", {}), 1.0, float, 0.0, 1.4)
+            probabilities = self._pattern_pack_values(data.get("probabilities", {}), 1.0, float, 0.0, 1.0)
+            ratchets = self._pattern_pack_values(data.get("ratchets", {}), 1, int, 1, 4)
+            bass_notes = self._pattern_pack_values(data.get("bass_notes", {}), 36, int, 12, 84)
+            bass_note_enabled = [
+                bool(enabled)
+                for enabled in self._pattern_pack_values(
+                    data.get("bass_note_enabled", {}), False, bool, 0, 1
+                )
+            ]
+            if "bass_note_enabled" not in data:
+                bass_note_enabled = [int(note) != 36 for note in bass_notes]
+            scene_tracks.append(
+                {
+                    "pattern": pattern,
+                    "velocities": velocities,
+                    "probabilities": probabilities,
+                    "ratchets": ratchets,
+                    "bass_notes": bass_notes,
+                    "bass_note_enabled": bass_note_enabled,
+                    "track_steps": int(np.clip(data.get("track_steps", track.track_steps), 1, STEPS)),
+                }
+            )
+        return scene_tracks
+
+    def _pattern_string_to_bools(self, value, fill_value: bool) -> list[bool]:
+        if isinstance(value, str):
+            steps = [char == "1" for char in value[:STEPS]]
+        else:
+            steps = [bool(step) for step in list(value)[:STEPS]] if value is not None else []
+        return steps + [fill_value] * (STEPS - len(steps))
+
+    def _pattern_pack_values(self, overrides, fill_value, caster, low, high) -> list:
+        values = [fill_value] * STEPS
+        if isinstance(overrides, (list, tuple)):
+            for index, value in enumerate(overrides[:STEPS]):
+                values[index] = self._clamp_pattern_value(value, caster, low, high)
+        elif isinstance(overrides, dict):
+            for key, value in overrides.items():
+                try:
+                    index = int(key)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < STEPS:
+                    values[index] = self._clamp_pattern_value(value, caster, low, high)
+        return values
+
+    def _clamp_pattern_value(self, value, caster, low, high):
+        if caster is bool:
+            return bool(value)
+        converted = caster(value)
+        return caster(np.clip(converted, low, high))
+
     def _snapshot_pattern_locked(self) -> dict:
         return {"tracks": [self._snapshot_track_pattern_locked(track) for track in self.tracks]}
 
@@ -1330,6 +1423,7 @@ class DrumEngine:
             )
         else:
             track.bass_note_enabled = [int(note) != 36 for note in track.bass_notes]
+        track.bass_enabled = any(track.bass_note_enabled)
         track.track_steps = int(np.clip(data.get("track_steps", track.track_steps), 1, STEPS))
 
     def _morph_scene_locked(self, source: dict, target: dict, amount: float) -> dict:

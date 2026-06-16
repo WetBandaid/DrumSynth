@@ -47,6 +47,7 @@ from .config import (
 )
 from .engine import DrumEngine
 from .kit_packs import KIT_PACK_NAMES
+from .pattern_packs import PATTERN_PACK_NAMES
 from .synth import make_hit
 from .tooltips import CONTROL_TOOLTIPS, PARAM_TOOLTIPS
 from .widgets import (
@@ -74,6 +75,7 @@ class MainWindow(QMainWindow):
         self.global_widgets = {"dials": {}, "buttons": {}}
         self.scene_buttons: list[QToolButton] = []
         self.pattern_track_combo: QComboBox | None = None
+        self.pattern_pack_combo: QComboBox | None = None
         self.song_rows_layout: QGridLayout | None = None
         self.song_play_button: QToolButton | None = None
         self.song_loop_button: QToolButton | None = None
@@ -143,38 +145,41 @@ class MainWindow(QMainWindow):
     def _param_tip(self, widget: QWidget, param: str):
         widget.setToolTip(PARAM_TOOLTIPS.get(param, ""))
 
-    def _build_transport(self) -> QHBoxLayout:
-        layout = QHBoxLayout()
+    def _build_transport(self) -> QVBoxLayout:
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
+        transport_row = QHBoxLayout()
+        transport_row.setSpacing(8)
 
         self.play_button = QPushButton("Play")
         self.play_button.setCheckable(True)
         self._set_tip(self.play_button, "play")
         self.play_button.clicked.connect(self._toggle_playback)
-        layout.addWidget(self.play_button)
+        transport_row.addWidget(self.play_button)
 
         stop_button = QPushButton("Stop")
         self._set_tip(stop_button, "stop")
         stop_button.clicked.connect(self._stop)
-        layout.addWidget(stop_button)
+        transport_row.addWidget(stop_button)
 
-        layout.addWidget(QLabel("BPM"))
+        transport_row.addWidget(QLabel("BPM"))
         self.bpm_spin = QDoubleSpinBox()
         self.bpm_spin.setRange(40.0, 240.0)
         self.bpm_spin.setDecimals(1)
         self.bpm_spin.setSingleStep(1.0)
         self._set_tip(self.bpm_spin, "bpm")
         self.bpm_spin.valueChanged.connect(self.engine.set_bpm)
-        layout.addWidget(self.bpm_spin)
+        transport_row.addWidget(self.bpm_spin)
 
-        layout.addWidget(QLabel("Swing"))
+        transport_row.addWidget(QLabel("Swing"))
         self.swing_slider = QSlider(Qt.Horizontal)
         self.swing_slider.setRange(0, 100)
         self.swing_slider.setFixedWidth(140)
         self._set_tip(self.swing_slider, "swing")
         self.swing_slider.valueChanged.connect(lambda value: self.engine.set_swing(value / 100.0))
-        layout.addWidget(self.swing_slider)
+        transport_row.addWidget(self.swing_slider)
 
-        layout.addWidget(QLabel("Master"))
+        transport_row.addWidget(QLabel("Master"))
         self.master_slider = QSlider(Qt.Horizontal)
         self.master_slider.setRange(0, 100)
         self.master_slider.setFixedWidth(140)
@@ -182,8 +187,15 @@ class MainWindow(QMainWindow):
         self.master_slider.valueChanged.connect(
             lambda value: self.engine.set_master_volume(value / 100.0)
         )
-        layout.addWidget(self.master_slider)
+        transport_row.addWidget(self.master_slider)
 
+        transport_row.addStretch(1)
+        self.output_meter = OutputSpectrumMeter()
+        transport_row.addWidget(self.output_meter)
+        layout.addLayout(transport_row)
+
+        action_row = QHBoxLayout()
+        action_row.setSpacing(8)
         for text, slot, tip_key in (
             ("Default", self._load_default, "default_pattern"),
             ("Clear", self._clear, "clear_pattern"),
@@ -196,16 +208,21 @@ class MainWindow(QMainWindow):
             button = QPushButton(text)
             self._set_tip(button, tip_key)
             button.clicked.connect(slot)
-            layout.addWidget(button)
+            action_row.addWidget(button)
 
-        layout.addStretch(1)
-        self.output_meter = OutputSpectrumMeter()
-        layout.addWidget(self.output_meter)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
         return layout
 
     def _build_sequencer_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
+        page = QScrollArea()
+        page.setWidgetResizable(True)
+        page.setMinimumSize(0, 0)
+        page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        content = QWidget()
+        page.setWidget(content)
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(18, 18, 18, 18)
         top_row = QHBoxLayout()
         top_row.setSpacing(12)
@@ -428,11 +445,13 @@ class MainWindow(QMainWindow):
 
     def _build_pattern_tools(self) -> QGroupBox:
         group = QGroupBox("Pattern Scenes")
-        layout = QHBoxLayout(group)
+        layout = QVBoxLayout(group)
         layout.setContentsMargins(14, 18, 14, 16)
         layout.setSpacing(8)
 
-        layout.addWidget(QLabel("Scene"))
+        scene_row = QHBoxLayout()
+        scene_row.setSpacing(8)
+        scene_row.addWidget(QLabel("Scene"))
         for index in range(PATTERN_SCENES):
             button = QToolButton()
             button.setText(str(index + 1))
@@ -442,17 +461,22 @@ class MainWindow(QMainWindow):
             button.clicked.connect(
                 lambda checked=False, scene_index=index: self._select_scene(scene_index)
             )
-            layout.addWidget(button)
+            scene_row.addWidget(button)
             self.scene_buttons.append(button)
 
-        layout.addSpacing(10)
-        layout.addWidget(QLabel("Name"))
+        scene_row.addSpacing(10)
+        scene_row.addWidget(QLabel("Name"))
         self.scene_name_edit = QLineEdit()
         self.scene_name_edit.setMaximumWidth(180)
         self._set_tip(self.scene_name_edit, "scene_name")
         self.scene_name_edit.editingFinished.connect(self._rename_current_scene)
-        layout.addWidget(self.scene_name_edit)
+        scene_row.addWidget(self.scene_name_edit)
+        scene_row.addStretch(1)
+        layout.addLayout(scene_row)
 
+        scene_action_row = QHBoxLayout()
+        scene_action_row.setSpacing(8)
+        scene_action_row.addWidget(QLabel("Scene Tools"))
         for text, slot, tip_key in (
             ("Store", self._store_scene, "store_scene"),
             ("Copy Scene", self._copy_scene, "copy_scene"),
@@ -463,15 +487,39 @@ class MainWindow(QMainWindow):
             button = QPushButton(text)
             self._set_tip(button, tip_key)
             button.clicked.connect(slot)
-            layout.addWidget(button)
+            scene_action_row.addWidget(button)
 
-        layout.addSpacing(16)
-        layout.addWidget(QLabel("Track"))
+        scene_action_row.addStretch(1)
+        layout.addLayout(scene_action_row)
+
+        groove_row = QHBoxLayout()
+        groove_row.setSpacing(8)
+        groove_row.addWidget(QLabel("Groove"))
+        self.pattern_pack_combo = QComboBox()
+        self.pattern_pack_combo.addItems(PATTERN_PACK_NAMES)
+        self._set_tip(self.pattern_pack_combo, "pattern_pack")
+        groove_row.addWidget(self.pattern_pack_combo)
+
+        for text, apply_kit, tip_key in (
+            ("Load Groove", False, "apply_pattern_pack"),
+            ("Groove + Kit", True, "apply_pattern_pack_with_kit"),
+        ):
+            button = QPushButton(text)
+            self._set_tip(button, tip_key)
+            button.clicked.connect(lambda checked=False, kit=apply_kit: self._apply_pattern_pack(kit))
+            groove_row.addWidget(button)
+
+        groove_row.addStretch(1)
+        layout.addLayout(groove_row)
+
+        track_row = QHBoxLayout()
+        track_row.setSpacing(8)
+        track_row.addWidget(QLabel("Track"))
         self.pattern_track_combo = QComboBox()
         self.pattern_track_combo.addItems(INSTRUMENTS)
         self._set_tip(self.pattern_track_combo, "pattern_track")
         self.pattern_track_combo.currentIndexChanged.connect(self._set_pattern_tool_track)
-        layout.addWidget(self.pattern_track_combo)
+        track_row.addWidget(self.pattern_track_combo)
 
         for text, slot, tip_key in (
             ("Copy Track", self._copy_track_pattern, "copy_track"),
@@ -483,9 +531,10 @@ class MainWindow(QMainWindow):
             button = QPushButton(text)
             self._set_tip(button, tip_key)
             button.clicked.connect(slot)
-            layout.addWidget(button)
+            track_row.addWidget(button)
 
-        layout.addStretch(1)
+        track_row.addStretch(1)
+        layout.addLayout(track_row)
         return group
 
     def _build_pattern_morph(self) -> QGroupBox:
@@ -2205,6 +2254,12 @@ class MainWindow(QMainWindow):
         )
         self._sync_from_engine()
         self.main_tabs.setCurrentIndex(1)
+
+    def _apply_pattern_pack(self, apply_kit: bool = False):
+        if self.pattern_pack_combo is None:
+            return
+        if self.engine.apply_pattern_pack(self.pattern_pack_combo.currentText(), apply_kit=apply_kit):
+            self._sync_from_engine()
 
     def _toggle_song_playback(self, checked: bool):
         if checked:
